@@ -1,0 +1,74 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "llm-router"
+version = "0.1.0"
+description = "LLM API Router with OpenAI and Anthropic protocol support"
+readme = "README.md"
+license = {text = "MIT"}
+requires-python = ">=3.10"
+authors = [
+    {name = "ansatz Vibe"},
+]
+keywords = ["flask", "llm", "openai", "anthropic", "mcp", "tool-calling", "router"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Internet :: WWW/HTTP :: WSGI :: Application",
+]
+dependencies = [
+    "flask>=3.0.0",
+    "json-repair>=0.30.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "ruff>=0.1.0",
+]
+examples = [
+    "openai>=1.0.0",
+    "anthropic>=0.18.0",
+]
+
+[project.scripts]
+llm-router = "llm_router:main"
+
+[project.urls]
+Homepage = "https://github.com/yourusername/llm-router"
+Repository = "https://github.com/yourusername/llm-router"
+Issues = "https://github.com/yourusername/llm-router/issues"
+
+[tool.setuptools.packages.find]
+include = ["llm_router*"]
+exclude = ["tests*", "examples*"]
+
+[tool.setuptools.package-data]
+llm_router = ["py.typed"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+select = ["E", "F", "I", "N", "W", "UP", "B", "C4", "SIM"]
+ignore = ["E501"]
+
+[tool.ruff.pydocstyle]
+convention = "google"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["llm_router"]

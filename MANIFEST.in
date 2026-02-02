@@ -1,0 +1,6 @@
+include README.md
+include LICENSE
+include pyproject.toml
+recursive-include llm_flask_wrapper *.py
+recursive-include examples *.py
+recursive-include tests *.py
