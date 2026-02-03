@@ -19,6 +19,14 @@ from .mcp_converter import (
     convert_anthropic_messages_to_openai,
 )
 from .llm_client import make_llm_request
+from .model_config import (
+    get_model_type,
+    is_multimodal,
+    get_text_model_media_prompt,
+    get_multimodal_document_prompt,
+    validate_content_blocks,
+    detect_content_type,
+)
 
 # Create Flask app
 app = Flask(__name__)
@@ -47,6 +55,99 @@ def create_app(llm_base_url=None, llm_api_key=None):
     return app
 
 
+def process_messages_with_content_validation(messages, is_anthropic_format=False):
+    """
+    Process messages and validate content based on model capabilities.
+
+    Args:
+        messages: List of messages
+        is_anthropic_format: True if using Anthropic format
+
+    Returns:
+        Tuple of (processed_messages, rejection_response)
+        - processed_messages: Messages if validation passed, None if rejected
+        - rejection_response: Response dict if content rejected, None if accepted
+    """
+    model_type = get_model_type()
+
+    for msg in messages:
+        content = msg.get("content")
+        if not content:
+            continue
+
+        # Handle string content (always text)
+        if isinstance(content, str):
+            continue
+
+        # Handle list content (Anthropic format or complex content blocks)
+        if isinstance(content, list):
+            is_valid, response_data = validate_content_blocks(content, is_anthropic_format)
+            if not is_valid:
+                # Content was rejected
+                return None, build_rejection_response(msg, response_data, is_anthropic_format)
+
+    return messages, None
+
+
+def build_rejection_response(original_msg, rejection_data, is_anthropic_format):
+    """
+    Build a rejection response when content cannot be processed.
+
+    Args:
+        original_msg: The message that was rejected
+        rejection_data: Data about why it was rejected
+        is_anthropic_format: True for Anthropic format, False for OpenAI
+
+    Returns:
+        Response dict in the appropriate format
+    """
+    rejection_type = rejection_data.get("type", "unknown")
+    message = rejection_data.get("message", "Content cannot be processed by this model.")
+
+    if is_anthropic_format:
+        # Anthropic format response
+        return {
+            "id": f"msg_{uuid.uuid4().hex[:12]}",
+            "type": "message",
+            "role": "assistant",
+            "model": "llm-router",
+            "content": [
+                {
+                    "type": "text",
+                    "text": message
+                }
+            ],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": len(message.split())
+            }
+        }
+    else:
+        # OpenAI format response
+        return {
+            "id": f"chatcmpl-{uuid.uuid4().hex[:10]}",
+            "object": "chat.completion",
+            "created": int(uuid.uuid1().time),
+            "model": "llm-router",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": message
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": len(message.split()),
+                "total_tokens": len(message.split())
+            }
+        }
+
+
 @app.route('/v1/chat/completions', methods=['POST'])
 def chat_completions():
     """OpenAI Chat Completions API endpoint."""
@@ -59,6 +160,18 @@ def chat_completions():
         tools = data_in.get("tools", [])
         temperature = data_in.get("temperature", 0.7)
         max_tokens = data_in.get("max_tokens", None)
+
+        # Validate messages for content that model cannot process
+        validated_messages, rejection_response = process_messages_with_content_validation(
+            messages, is_anthropic_format=False
+        )
+
+        if rejection_response:
+            # Content was rejected, return the rejection response
+            return jsonify(rejection_response)
+
+        # Use validated messages (may have been modified)
+        messages = validated_messages
 
         # Build LLM request payload
         llm_payload = {
@@ -138,6 +251,18 @@ def messages():
         tools = data_in.get("tools", [])
         temperature = data_in.get("temperature", 0.7)
         max_tokens = data_in.get("max_tokens", 4096)
+
+        # Validate messages for content that model cannot process
+        validated_messages, rejection_response = process_messages_with_content_validation(
+            messages, is_anthropic_format=True
+        )
+
+        if rejection_response:
+            # Content was rejected, return the rejection response
+            return jsonify(rejection_response)
+
+        # Use validated messages
+        messages = validated_messages
 
         # Convert Anthropic messages to OpenAI format for LLM backend
         openai_messages = convert_anthropic_messages_to_openai(messages)
@@ -241,7 +366,8 @@ def health_check():
     """Health check endpoint."""
     return jsonify({
         "status": "ok",
-        "llm_base_url": LLM_BASE_URL
+        "llm_base_url": LLM_BASE_URL,
+        "model_type": get_model_type()
     })
 
 
@@ -259,6 +385,99 @@ def index():
         },
         "documentation": "See README.md for details"
     })
+
+
+def process_messages_with_content_validation(messages, is_anthropic_format=False):
+    """
+    Process messages and validate content based on model capabilities.
+
+    Args:
+        messages: List of messages
+        is_anthropic_format: True if using Anthropic format
+
+    Returns:
+        Tuple of (processed_messages, rejection_response)
+        - processed_messages: Messages if validation passed, None if rejected
+        - rejection_response: Response dict if content rejected, None if accepted
+    """
+    model_type = get_model_type()
+
+    for msg in messages:
+        content = msg.get("content")
+        if not content:
+            continue
+
+        # Handle string content (always text)
+        if isinstance(content, str):
+            continue
+
+        # Handle list content (Anthropic format or complex content blocks)
+        if isinstance(content, list):
+            is_valid, response_data = validate_content_blocks(content, is_anthropic_format)
+            if not is_valid:
+                # Content was rejected
+                return None, build_rejection_response(msg, response_data, is_anthropic_format)
+
+    return messages, None
+
+
+def build_rejection_response(original_msg, rejection_data, is_anthropic_format):
+    """
+    Build a rejection response when content cannot be processed.
+
+    Args:
+        original_msg: The message that was rejected
+        rejection_data: Data about why it was rejected
+        is_anthropic_format: True for Anthropic format, False for OpenAI
+
+    Returns:
+        Response dict in the appropriate format
+    """
+    rejection_type = rejection_data.get("type", "unknown")
+    message = rejection_data.get("message", "Content cannot be processed by this model.")
+
+    if is_anthropic_format:
+        # Anthropic format response
+        return {
+            "id": f"msg_{uuid.uuid4().hex[:12]}",
+            "type": "message",
+            "role": "assistant",
+            "model": "llm-router",
+            "content": [
+                {
+                    "type": "text",
+                    "text": message
+                }
+            ],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 0,
+                "output_tokens": len(message.split())
+            }
+        }
+    else:
+        # OpenAI format response
+        return {
+            "id": f"chatcmpl-{uuid.uuid4().hex[:10]}",
+            "object": "chat.completion",
+            "created": int(uuid.uuid1().time),
+            "model": "llm-router",
+            "choices": [
+                {
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": message
+                    },
+                    "finish_reason": "stop"
+                }
+            ],
+            "usage": {
+                "prompt_tokens": 0,
+                "completion_tokens": len(message.split()),
+                "total_tokens": len(message.split())
+            }
+        }
 
 
 if __name__ == "__main__":

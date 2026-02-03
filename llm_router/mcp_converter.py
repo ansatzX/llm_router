@@ -244,8 +244,25 @@ def convert_anthropic_messages_to_openai(messages: list) -> list:
                 if block.get("type") == "text":
                     text_parts.append(block.get("text", ""))
                 elif block.get("type") == "image":
-                    # Handle image blocks if present
-                    pass
+                    # Convert Anthropic image to OpenAI format
+                    source = block.get("source", {})
+                    if source.get("type") == "base64":
+                        media_type = source.get("media_type", "image/png")
+                        data = source.get("data", "")
+                        # Build data URL for OpenAI format
+                        image_url = f"data:{media_type};base64,{data}"
+                        # For OpenAI format, we need to keep the image in the content array
+                        # Store it in a special format that the backend can understand
+                        if "content" not in openai_msg:
+                            openai_msg["content"] = []
+                        if not isinstance(openai_msg["content"], list):
+                            # Convert string to array
+                            current_content = openai_msg["content"]
+                            openai_msg["content"] = [{"type": "text", "text": current_content}] if current_content else []
+                        openai_msg["content"].append({
+                            "type": "image_url",
+                            "image_url": {"url": image_url}
+                        })
                 elif block.get("type") == "tool_use":
                     # Convert tool_use to OpenAI tool_call format
                     tool_calls.append({
@@ -262,10 +279,20 @@ def convert_anthropic_messages_to_openai(messages: list) -> list:
                     if isinstance(block.get("content"), str):
                         text_parts.append(f"Tool result: {block.get('content')}")
 
-            # Set content
-            if text_parts:
+            # Handle content setting
+            # If content is already a list (from image processing), keep it
+            # Otherwise, create content from text_parts
+            if isinstance(openai_msg.get("content"), list):
+                # Content is already a list (contains image_url or other blocks)
+                # Add text parts as a text block if there are any
+                if text_parts:
+                    text_content = "\n".join(text_parts)
+                    openai_msg["content"].insert(0, {"type": "text", "text": text_content})
+            elif text_parts:
+                # Only text parts, no list content
                 openai_msg["content"] = "\n".join(text_parts)
             else:
+                # No content at all
                 openai_msg["content"] = ""
 
             # Add tool_calls if present
