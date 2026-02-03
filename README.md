@@ -35,6 +35,10 @@ This router acts as a proxy between LLM backends (which may output MCP XML forma
 | Tool Result Format | `{role: "tool", tool_call_id, content}` | `{role: "user", content: [{type: "tool_result", ...}]}` |
 | Streaming | Yes (`stream: true`) | Yes (`stream: true`) |
 
+## Unified Interface
+
+The router provides a unified interface `/v1/chat` that automatically detects the request format and routes it to the appropriate handler. This simplifies client implementation by supporting both OpenAI and Anthropic protocol formats through a single endpoint.
+
 ## Tool Call Format Conversion
 
 ### MCP XML Format (Input)
@@ -153,6 +157,8 @@ Environment variables:
 | `LLM_BASE_URL` | LLM backend URL | `http://localhost:8000` |
 | `LLM_API_KEY` | LLM API key (if required) | `None` |
 | `FLASK_PORT` | Port for the router | `5001` |
+| `MODEL_TYPE` | Model type: "text" or "multimodal" | "text" |
+| `MAX_UPLOAD_SIZE_MB` | Maximum file size for uploads | 10 |
 
 ### Example with Real LLM API
 
@@ -172,7 +178,8 @@ llm_router/                    # 主包
 ├── __init__.py               # 包入口
 ├── server.py                 # Flask 服务器和路由
 ├── llm_client.py             # LLM 后端 HTTP 客户端
-└── mcp_converter.py          # MCP XML 格式转换工具
+├── mcp_converter.py          # MCP XML 格式转换工具
+└── model_config.py           # 模型配置和内容验证
 
 examples/                     # 示例代码
 tests/                        # 测试代码
@@ -183,6 +190,7 @@ README.md                    # 本文档
 
 ## API Endpoints
 
+- `POST /v1/chat` - 统一接口（自动检测协议格式）
 - `POST /v1/chat/completions` - OpenAI 协议端点
 - `POST /v1/messages` - Anthropic 协议端点
 - `GET /v1/models` - 模型列表

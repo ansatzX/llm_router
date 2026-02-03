@@ -45,16 +45,6 @@ def get_max_upload_size() -> int:
         return 10 * 1024 * 1024
 
 
-def get_allowed_image_formats() -> list:
-    """Get list of allowed image formats."""
-    formats = os.environ.get("ALLOWED_IMAGE_FORMATS", "png,jpg,jpeg,webp,gif")
-    return [f.strip().lower() for f in formats.split(",") if f.strip()]
-
-
-def get_allowed_document_formats() -> list:
-    """Get list of allowed document formats."""
-    formats = os.environ.get("ALLOWED_DOCUMENT_FORMATS", "pdf,txt,doc,docx,md")
-    return [f.strip().lower() for f in formats.split(",") if f.strip()]
 
 
 def get_text_model_media_prompt() -> str:

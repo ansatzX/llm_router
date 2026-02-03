@@ -17,6 +17,41 @@ import re
 import uuid
 
 
+def is_anthropic_format(request_json: dict) -> bool:
+    """
+    Determine if the request JSON is in Anthropic format or OpenAI format.
+
+    Key differences:
+    - Anthropic uses {"type": "image"} blocks with source.data for base64
+    - OpenAI uses {"type": "image_url"} blocks with image_url.url for base64
+
+    Args:
+        request_json: The request JSON to analyze
+
+    Returns:
+        True if Anthropic format, False if OpenAI format
+    """
+    # Check messages content blocks
+    messages = request_json.get("messages", [])
+    for msg in messages:
+        content = msg.get("content")
+        if isinstance(content, list):
+            for block in content:
+                block_type = block.get("type", "")
+                if block_type == "image":
+                    return True
+                elif block_type == "image_url":
+                    return False
+
+    # If no content blocks with images, check other Anthropic-specific fields
+    if "max_tokens" in request_json and "model" in request_json:
+        # Check for Anthropic-style tools
+        if "tools" in request_json:
+            return True
+
+    return False
+
+
 def parse_mcp_tool_call(response_text: str) -> dict:
     """
     Parse a single MCP-style tool call from response text.

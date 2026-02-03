@@ -55,97 +55,6 @@ def create_app(llm_base_url=None, llm_api_key=None):
     return app
 
 
-def process_messages_with_content_validation(messages, is_anthropic_format=False):
-    """
-    Process messages and validate content based on model capabilities.
-
-    Args:
-        messages: List of messages
-        is_anthropic_format: True if using Anthropic format
-
-    Returns:
-        Tuple of (processed_messages, rejection_response)
-        - processed_messages: Messages if validation passed, None if rejected
-        - rejection_response: Response dict if content rejected, None if accepted
-    """
-    model_type = get_model_type()
-
-    for msg in messages:
-        content = msg.get("content")
-        if not content:
-            continue
-
-        # Handle string content (always text)
-        if isinstance(content, str):
-            continue
-
-        # Handle list content (Anthropic format or complex content blocks)
-        if isinstance(content, list):
-            is_valid, response_data = validate_content_blocks(content, is_anthropic_format)
-            if not is_valid:
-                # Content was rejected
-                return None, build_rejection_response(msg, response_data, is_anthropic_format)
-
-    return messages, None
-
-
-def build_rejection_response(original_msg, rejection_data, is_anthropic_format):
-    """
-    Build a rejection response when content cannot be processed.
-
-    Args:
-        original_msg: The message that was rejected
-        rejection_data: Data about why it was rejected
-        is_anthropic_format: True for Anthropic format, False for OpenAI
-
-    Returns:
-        Response dict in the appropriate format
-    """
-    rejection_type = rejection_data.get("type", "unknown")
-    message = rejection_data.get("message", "Content cannot be processed by this model.")
-
-    if is_anthropic_format:
-        # Anthropic format response
-        return {
-            "id": f"msg_{uuid.uuid4().hex[:12]}",
-            "type": "message",
-            "role": "assistant",
-            "model": "llm-router",
-            "content": [
-                {
-                    "type": "text",
-                    "text": message
-                }
-            ],
-            "stop_reason": "end_turn",
-            "usage": {
-                "input_tokens": 0,
-                "output_tokens": len(message.split())
-            }
-        }
-    else:
-        # OpenAI format response
-        return {
-            "id": f"chatcmpl-{uuid.uuid4().hex[:10]}",
-            "object": "chat.completion",
-            "created": int(uuid.uuid1().time),
-            "model": "llm-router",
-            "choices": [
-                {
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": message
-                    },
-                    "finish_reason": "stop"
-                }
-            ],
-            "usage": {
-                "prompt_tokens": 0,
-                "completion_tokens": len(message.split()),
-                "total_tokens": len(message.split())
-            }
-        }
 
 
 @app.route('/v1/chat/completions', methods=['POST'])
@@ -194,31 +103,35 @@ def chat_completions():
         message = choice.get("message", {})
         response_text = message.get("content", "")
 
-        # Check for MCP tool calls in response
-        tool_calls = mcp_to_openai_tool_calls(response_text)
-        text_blocks = [b for b in build_anthropic_content_blocks(response_text) if b.get("type") == "text"]
-        text_content = text_blocks[0].get("text", "") if text_blocks else ""
+        # Check for MCP tool calls in response only if tools were requested
+        if tools:
+            tool_calls = mcp_to_openai_tool_calls(response_text)
+            text_blocks = [b for b in build_anthropic_content_blocks(response_text) if b.get("type") == "text"]
+            text_content = text_blocks[0].get("text", "") if text_blocks else ""
 
-        # Build OpenAI-style response
-        response = {
-            "id": llm_response.get("id", f"chatcmpl-{uuid.uuid4().hex[:8]}"),
-            "object": "chat.completion",
-            "created": llm_response.get("created", 0),
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "message": {
-                    "role": "assistant",
-                    "content": text_content,
-                },
-                "finish_reason": "tool_calls" if tool_calls else choice.get("finish_reason", "stop")
-            }],
-            "usage": llm_response.get("usage", {})
-        }
+            # Build OpenAI-style response
+            response = {
+                "id": llm_response.get("id", f"chatcmpl-{uuid.uuid4().hex[:8]}"),
+                "object": "chat.completion",
+                "created": llm_response.get("created", 0),
+                "model": model,
+                "choices": [{
+                    "index": 0,
+                    "message": {
+                        "role": "assistant",
+                        "content": text_content,
+                    },
+                    "finish_reason": "tool_calls" if tool_calls else choice.get("finish_reason", "stop")
+                }],
+                "usage": llm_response.get("usage", {})
+            }
 
-        # Add tool_calls if present
-        if tool_calls:
-            response["choices"][0]["message"]["tool_calls"] = tool_calls
+            # Add tool_calls if present
+            if tool_calls:
+                response["choices"][0]["message"]["tool_calls"] = tool_calls
+        else:
+            # If no tools were requested, return response as-is
+            response = llm_response
 
         return jsonify(response)
 
@@ -300,26 +213,49 @@ def messages():
         message = choice.get("message", {})
         response_text = message.get("content", "")
 
-        # Build Anthropic-style content blocks
-        content_blocks = build_anthropic_content_blocks(response_text)
+        # Check for MCP tool calls in response only if tools were requested
+        if tools:
+            # Build Anthropic-style content blocks
+            content_blocks = build_anthropic_content_blocks(response_text)
 
-        # Determine stop reason
-        tool_blocks = [b for b in content_blocks if b.get("type") == "tool_use"]
-        stop_reason = "tool_use" if tool_blocks else choice.get("finish_reason", "stop")
+            # Determine stop reason
+            tool_blocks = [b for b in content_blocks if b.get("type") == "tool_use"]
+            stop_reason = "tool_use" if tool_blocks else choice.get("finish_reason", "stop")
 
-        # Build Anthropic-style response
-        response = {
-            "id": f"msg_{uuid.uuid4().hex[:8]}",
-            "type": "message",
-            "role": "assistant",
-            "content": content_blocks,
-            "model": model,
-            "stop_reason": stop_reason,
-            "usage": llm_response.get("usage", {
-                "input_tokens": 0,
-                "output_tokens": 0
-            })
-        }
+            # Build Anthropic-style response
+            response = {
+                "id": f"msg_{uuid.uuid4().hex[:8]}",
+                "type": "message",
+                "role": "assistant",
+                "content": content_blocks,
+                "model": model,
+                "stop_reason": stop_reason,
+                "usage": llm_response.get("usage", {
+                    "input_tokens": 0,
+                    "output_tokens": 0
+                })
+            }
+        else:
+            # If no tools were requested, return response as-is
+            # Convert OpenAI format response to Anthropic format
+            if "choices" in llm_response:
+                choice = llm_response["choices"][0]
+                message = choice.get("message", {})
+                content = message.get("content", "")
+                response = {
+                    "id": f"msg_{uuid.uuid4().hex[:8]}",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": content}],
+                    "model": model,
+                    "stop_reason": choice.get("finish_reason", "stop"),
+                    "usage": llm_response.get("usage", {
+                        "input_tokens": 0,
+                        "output_tokens": 0
+                    })
+                }
+            else:
+                response = llm_response
 
         return jsonify(response)
 
@@ -368,22 +304,6 @@ def health_check():
         "status": "ok",
         "llm_base_url": LLM_BASE_URL,
         "model_type": get_model_type()
-    })
-
-
-@app.route('/', methods=['GET'])
-def index():
-    """Root endpoint with API information."""
-    return jsonify({
-        "name": "LLM Router",
-        "description": "Flask-based router with OpenAI and Anthropic protocol support",
-        "endpoints": {
-            "openai": "/v1/chat/completions",
-            "anthropic": "/v1/messages",
-            "models": "/v1/models",
-            "health": "/health"
-        },
-        "documentation": "See README.md for details"
     })
 
 
@@ -478,6 +398,48 @@ def build_rejection_response(original_msg, rejection_data, is_anthropic_format):
                 "total_tokens": len(message.split())
             }
         }
+
+
+@app.route('/v1/chat', methods=['POST'])
+def unified_chat():
+    """Unified chat endpoint that auto-detects protocol format."""
+    from llm_router.mcp_converter import is_anthropic_format
+
+    try:
+        data_in = request.get_json()
+
+        # Auto-detect protocol format
+        if is_anthropic_format(data_in):
+            return messages()  # Delegate to Anthropic handler
+        else:
+            return chat_completions()  # Delegate to OpenAI handler
+
+    except Exception as e:
+        return jsonify({
+            "error": {
+                "message": str(e),
+                "type": "server_error"
+            }
+        }), 500
+
+
+@app.route('/', methods=['GET'])
+def index():
+    """Root endpoint with API information."""
+    return jsonify({
+        "name": "LLM Router",
+        "description": "Flask-based router with OpenAI and Anthropic protocol support",
+        "endpoints": {
+            "unified": "/v1/chat",
+            "openai": "/v1/chat/completions",
+            "anthropic": "/v1/messages",
+            "models": "/v1/models",
+            "health": "/health"
+        },
+        "documentation": "See README.md for details"
+    })
+
+
 
 
 if __name__ == "__main__":
