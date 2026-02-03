@@ -8,6 +8,7 @@ OpenAI and Anthropic protocol endpoints.
 import json
 import os
 import uuid
+import logging
 from flask import Flask, request, jsonify
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
@@ -28,13 +29,57 @@ from .model_config import (
     detect_content_type,
 )
 
-# Create Flask app
-app = Flask(__name__)
+# Configure logging
+logger = logging.getLogger(__name__)
 
 # Configuration
 LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://localhost:8000")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", None)
 FLASK_PORT = int(os.environ.get("FLASK_PORT", "5001"))
+
+
+# Create Flask app
+app = Flask(__name__)
+
+
+def create_error_response(message: str, is_anthropic_format: bool = False, status_code: int = 500):
+    """Create a sanitized error response.
+
+    In production, detailed error messages are logged but not returned to clients.
+    """
+    # Log the detailed error for debugging
+    logger.error(f"Server error: {message}")
+
+    if is_anthropic_format:
+        return jsonify({
+            "type": "error",
+            "error": {
+                "type": "server_error",
+                "message": "An internal error occurred. Please try again later."
+            }
+        }), status_code
+    else:
+        return jsonify({
+            "error": {
+                "type": "server_error",
+                "message": "An internal error occurred. Please try again later."
+            }
+        }), status_code
+
+
+class AppConfig:
+    """Application configuration container."""
+    def __init__(self):
+        self.llm_base_url = os.environ.get("LLM_BASE_URL", "http://localhost:8000")
+        self.llm_api_key = os.environ.get("LLM_API_KEY", None)
+        self.flask_port = int(os.environ.get("FLASK_PORT", "5001"))
+
+    def update(self, llm_base_url=None, llm_api_key=None):
+        """Update configuration values."""
+        if llm_base_url is not None:
+            self.llm_base_url = llm_base_url
+        if llm_api_key is not None:
+            self.llm_api_key = llm_api_key
 
 
 def create_app(llm_base_url=None, llm_api_key=None):
@@ -45,13 +90,16 @@ def create_app(llm_base_url=None, llm_api_key=None):
         llm_api_key: Optional LLM API key. If not provided, uses env var or None.
 
     Returns:
-        The configured Flask app.
+        The configured Flask app with attached config.
     """
+    app.config_obj = AppConfig()
+    app.config_obj.update(llm_base_url, llm_api_key)
+
+    # Update module-level config for backward compatibility
     global LLM_BASE_URL, LLM_API_KEY
-    if llm_base_url:
-        LLM_BASE_URL = llm_base_url
-    if llm_api_key:
-        LLM_API_KEY = llm_api_key
+    LLM_BASE_URL = app.config_obj.llm_base_url
+    LLM_API_KEY = app.config_obj.llm_api_key
+
     return app
 
 
@@ -136,12 +184,8 @@ def chat_completions():
         return jsonify(response)
 
     except Exception as e:
-        return jsonify({
-            "error": {
-                "message": str(e),
-                "type": "server_error"
-            }
-        }), 500
+        logger.exception("Error in chat_completions")
+        return create_error_response(str(e), is_anthropic_format=False, status_code=500)
 
 
 @app.route('/v1/messages', methods=['POST'])
@@ -260,13 +304,8 @@ def messages():
         return jsonify(response)
 
     except Exception as e:
-        return jsonify({
-            "type": "error",
-            "error": {
-                "type": "server_error",
-                "message": str(e)
-            }
-        }), 500
+        logger.exception("Error in messages endpoint")
+        return create_error_response(str(e), is_anthropic_format=True, status_code=500)
 
 
 @app.route('/v1/models', methods=['GET'])
@@ -415,12 +454,14 @@ def unified_chat():
             return chat_completions()  # Delegate to OpenAI handler
 
     except Exception as e:
-        return jsonify({
-            "error": {
-                "message": str(e),
-                "type": "server_error"
-            }
-        }), 500
+        logger.exception("Error in unified_chat")
+        # Try to detect format from request for error response
+        try:
+            data_in = request.get_json() or {}
+            is_anthropic = is_anthropic_format(data_in)
+        except Exception:
+            is_anthropic = False
+        return create_error_response(str(e), is_anthropic_format=is_anthropic, status_code=500)
 
 
 @app.route('/', methods=['GET'])

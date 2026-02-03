@@ -63,6 +63,11 @@ def parse_mcp_tool_call(response_text: str) -> dict:
         dict with keys: server_name, tool_name, arguments
         None if no valid tool call is found
     """
+    # Limit input size to prevent ReDoS
+    MAX_RESPONSE_SIZE = 10 * 1024 * 1024  # 10MB
+    if len(response_text) > MAX_RESPONSE_SIZE:
+        response_text = response_text[:MAX_RESPONSE_SIZE]
+
     match = re.search(r'<use_mcp_tool>(.*?)</use_mcp_tool>', response_text, re.DOTALL)
     if not match:
         return None
@@ -102,6 +107,11 @@ def extract_tool_calls_from_content(response_text: str) -> list:
     Returns:
         List of tool call dicts, each containing server_name, tool_name, arguments
     """
+    # Limit input size to prevent ReDoS
+    MAX_RESPONSE_SIZE = 10 * 1024 * 1024  # 10MB
+    if len(response_text) > MAX_RESPONSE_SIZE:
+        response_text = response_text[:MAX_RESPONSE_SIZE]
+
     tool_calls = []
     pattern = r'<use_mcp_tool>(.*?)</use_mcp_tool>'
     matches = re.findall(pattern, response_text, re.DOTALL)

@@ -159,6 +159,7 @@ Environment variables:
 | `FLASK_PORT` | Port for the router | `5001` |
 | `MODEL_TYPE` | Model type: "text" or "multimodal" | "text" |
 | `MAX_UPLOAD_SIZE_MB` | Maximum file size for uploads | 10 |
+| `LLM_REQUEST_TIMEOUT` | Request timeout in seconds (not set = no timeout) | `None` |
 
 ### Example with Real LLM API
 

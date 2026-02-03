@@ -10,25 +10,62 @@ This module provides functionality for:
 import os
 import base64
 import mimetypes
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, Literal
 
 
-def get_model_type() -> str:
+# Valid model types
+VALID_MODEL_TYPES = ("text", "multimodal")
+
+
+def validate_model_type(value: str) -> Literal["text", "multimodal"]:
+    """Validate and normalize model type value.
+
+    Args:
+        value: The model type string to validate
+
+    Returns:
+        Normalized model type ("text" or "multimodal")
+    """
+    normalized = value.lower().strip()
+    return normalized if normalized in VALID_MODEL_TYPES else "text"
+
+
+def get_model_type() -> Literal["text", "multimodal"]:
     """
     Get the model type from environment variable.
 
     Returns:
         "text" or "multimodal"
     """
-    model_type = os.environ.get("MODEL_TYPE", "text").lower().strip()
-    if model_type not in ("text", "multimodal"):
-        return "text"
-    return model_type
+    return validate_model_type(os.environ.get("MODEL_TYPE", "text"))
 
 
 def is_multimodal() -> bool:
     """Check if the configured model is multimodal."""
     return get_model_type() == "multimodal"
+
+
+def parse_int_env(env_var: str, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
+    """Parse integer environment variable with validation.
+
+    Args:
+        env_var: Name of the environment variable
+        default: Default value if not set or invalid
+        min_value: Optional minimum allowed value
+        max_value: Optional maximum allowed value
+
+    Returns:
+        Parsed and validated integer value
+    """
+    try:
+        value = int(os.environ.get(env_var, str(default)))
+        if min_value is not None:
+            value = max(value, min_value)
+        if max_value is not None:
+            value = min(value, max_value)
+        return value
+    except (ValueError, TypeError):
+        return default
 
 
 def get_max_upload_size() -> int:
@@ -38,11 +75,8 @@ def get_max_upload_size() -> int:
     Returns:
         Maximum size in bytes (default: 10MB)
     """
-    try:
-        max_mb = int(os.environ.get("MAX_UPLOAD_SIZE_MB", "10"))
-        return max_mb * 1024 * 1024
-    except ValueError:
-        return 10 * 1024 * 1024
+    max_mb = parse_int_env("MAX_UPLOAD_SIZE_MB", default=10, min_value=1, max_value=100)
+    return max_mb * 1024 * 1024
 
 
 
@@ -120,6 +154,29 @@ def detect_content_type(content_block: dict) -> Tuple[str, Optional[str]]:
     return ("unknown", None)
 
 
+def _check_image_content(model_type: str) -> Tuple[bool, Optional[dict]]:
+    """Check if image content is allowed for the model type."""
+    if model_type == "text":
+        return (False, {
+            "type": "text_model_rejection",
+            "message": get_text_model_media_prompt()
+        })
+    return (True, None)
+
+
+def _check_document_content(model_type: str) -> Tuple[bool, Optional[dict]]:
+    """Check if document content is allowed for the model type."""
+    if model_type == "multimodal":
+        return (False, {
+            "type": "multimodal_document_rejection",
+            "message": get_multimodal_document_prompt()
+        })
+    return (False, {
+        "type": "text_model_rejection",
+        "message": get_text_model_media_prompt()
+    })
+
+
 def validate_content_blocks(
     content_blocks: list,
     is_anthropic_format: bool = False
@@ -138,35 +195,17 @@ def validate_content_blocks(
     """
     model_type = get_model_type()
 
+    content_validators = {
+        "text": lambda: (True, None),
+        "image": lambda: _check_image_content(model_type),
+        "document": lambda: _check_document_content(model_type),
+    }
+
     for block in content_blocks:
-        content_type, file_format = detect_content_type(block)
+        content_type, _ = detect_content_type(block)
+        validator = content_validators.get(content_type, lambda: (True, None))
+        is_valid, response_data = validator()
+        if not is_valid:
+            return (False, response_data)
 
-        if content_type == "text":
-            continue  # Text is always allowed
-
-        elif content_type == "image":
-            if model_type == "text":
-                # Text model cannot process images
-                return (False, {
-                    "type": "text_model_rejection",
-                    "message": get_text_model_media_prompt()
-                })
-            # Multimodal model can process images
-            continue
-
-        elif content_type == "document":
-            # Documents always require local tool processing
-            # regardless of model type
-            if model_type == "multimodal":
-                return (False, {
-                    "type": "multimodal_document_rejection",
-                    "message": get_multimodal_document_prompt()
-                })
-            else:
-                return (False, {
-                    "type": "text_model_rejection",
-                    "message": get_text_model_media_prompt()
-                })
-
-    # All content blocks passed validation
     return (True, None)

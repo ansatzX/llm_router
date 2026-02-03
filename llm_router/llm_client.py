@@ -5,8 +5,24 @@ This module provides functions for making HTTP requests to the LLM backend.
 """
 
 import json
+import os
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
+
+
+def get_request_timeout() -> float | None:
+    """Get request timeout from environment variable.
+
+    Returns:
+        Timeout in seconds, or None if not set (no timeout)
+    """
+    timeout_str = os.environ.get("LLM_REQUEST_TIMEOUT")
+    if not timeout_str:
+        return None
+    try:
+        return float(timeout_str)
+    except ValueError:
+        return None
 
 
 def make_llm_request(payload: dict, llm_base_url: str, api_key: str = None) -> dict:
@@ -36,9 +52,15 @@ def make_llm_request(payload: dict, llm_base_url: str, api_key: str = None) -> d
 
     req = Request(url, data=data, headers=headers)
 
+    timeout = get_request_timeout()
+
     try:
-        with urlopen(req) as response:
-            return json.loads(response.read().decode('utf-8'))
+        if timeout is not None:
+            with urlopen(req, timeout=timeout) as response:
+                return json.loads(response.read().decode('utf-8'))
+        else:
+            with urlopen(req) as response:
+                return json.loads(response.read().decode('utf-8'))
     except HTTPError as e:
         error_data = e.read().decode('utf-8')
         raise Exception(f"LLM HTTP error {e.code}: {error_data}")
