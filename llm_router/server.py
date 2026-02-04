@@ -28,7 +28,6 @@ from .mcp_converter import (
     generate_lazy_mcp_prompt,
     get_tool_definitions_by_names,
     extract_tool_calls_from_content,
-    strip_think_tags,
     is_anthropic_format,
 )
 from .llm_client import make_llm_request
@@ -46,12 +45,16 @@ LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://localhost:8000")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", None)
 FLASK_PORT = int(os.environ.get("FLASK_PORT", "5001"))
 # Max tokens cap - prevents requests exceeding model context length
-MAX_TOKENS_CAP = int(os.environ.get("MAX_TOKENS_CAP", "4096"))
+MAX_TOKENS_CAP = int(os.environ.get("MAX_TOKENS_CAP", "16384"))
 # Max tools definition size in characters (roughly 4 chars per token)
 # If tools exceed this, use lazy loading instead of full MCP prompt
 MAX_TOOLS_CHARS = int(os.environ.get("MAX_TOOLS_CHARS", "40000"))
 # Max rounds for search_tools internal loop
 MAX_TOOL_SEARCH_ROUNDS = int(os.environ.get("MAX_TOOL_SEARCH_ROUNDS", "20"))
+# Max message content chars (roughly 4 chars per token)
+# Default 800k chars ≈ 200k tokens (Claude's context window)
+# For smaller models, set MAX_CONTEXT_CHARS in .env (e.g., 52000 for 21k token model)
+MAX_CONTEXT_CHARS = int(os.environ.get("MAX_CONTEXT_CHARS", "800000"))
 
 # Debug mode for detailed logging
 DEBUG_MODE = False
@@ -77,6 +80,111 @@ def log_debug(message: str, data: dict = None):
             f.write("\n")
 
 
+def truncate_messages(messages: list, max_chars: int = None) -> list:
+    """
+    Truncate messages to fit within context limit.
+
+    Strategy:
+    - Always keep the first message (usually system prompt)
+    - Always keep the last message (current user request)
+    - Remove older messages from the middle until under limit
+    - If a single message is too long, truncate its content
+
+    Args:
+        messages: List of message dicts with 'role' and 'content'
+        max_chars: Maximum total characters (defaults to MAX_CONTEXT_CHARS)
+
+    Returns:
+        Truncated list of messages
+    """
+    if max_chars is None:
+        max_chars = MAX_CONTEXT_CHARS
+
+    def get_content_len(msg):
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            return len(content)
+        elif isinstance(content, list):
+            return sum(len(str(c.get("text", ""))) for c in content if isinstance(c, dict))
+        return 0
+
+    def get_total_chars(msgs):
+        return sum(get_content_len(m) for m in msgs)
+
+    total = get_total_chars(messages)
+    if total <= max_chars:
+        return messages
+
+    print(f"[Truncate] Messages exceed limit: {total} > {max_chars}, truncating...")
+
+    # If only 1-2 messages, can't remove middle - truncate content
+    if len(messages) <= 2:
+        truncated = []
+        remaining = max_chars
+        for i, msg in enumerate(messages):
+            msg_copy = msg.copy()
+            content = msg_copy.get("content", "")
+            if isinstance(content, str) and len(content) > remaining:
+                # Keep last portion (more relevant for recent context)
+                msg_copy["content"] = "...[truncated]..." + content[-(remaining - 20):]
+                remaining = 0
+            else:
+                remaining -= get_content_len(msg_copy)
+            truncated.append(msg_copy)
+        return truncated
+
+    # Keep first (system) and last (current request), remove from middle
+    result = [messages[0]]  # First message
+    middle = messages[1:-1]  # Middle messages
+    last = messages[-1]  # Last message
+
+    # Calculate space needed for first and last
+    first_len = get_content_len(messages[0])
+    last_len = get_content_len(last)
+    available = max_chars - first_len - last_len
+
+    if available <= 0:
+        # First + last alone exceed limit, truncate last message
+        print(f"[Truncate] First+last exceed limit, truncating last message")
+        last_copy = last.copy()
+        content = last_copy.get("content", "")
+        if isinstance(content, str):
+            max_last = max_chars - first_len - 100  # Leave some margin
+            if max_last > 0:
+                last_copy["content"] = content[:max_last] + "...[truncated]"
+            else:
+                last_copy["content"] = content[:1000] + "...[truncated]"
+        return [messages[0], last_copy]
+
+    # Add middle messages from most recent, until limit
+    kept_middle = []
+    used = 0
+    for msg in reversed(middle):
+        msg_len = get_content_len(msg)
+        if used + msg_len <= available:
+            kept_middle.insert(0, msg)
+            used += msg_len
+        else:
+            # Can't fit this message - try truncating it
+            remaining = available - used
+            if remaining > 500:  # Worth keeping a truncated version
+                msg_copy = msg.copy()
+                content = msg_copy.get("content", "")
+                if isinstance(content, str):
+                    msg_copy["content"] = content[:remaining - 20] + "...[truncated]"
+                    kept_middle.insert(0, msg_copy)
+            break
+
+    result.extend(kept_middle)
+    result.append(last)
+
+    new_total = get_total_chars(result)
+    removed = len(messages) - len(result)
+    print(f"[Truncate] Removed {removed} messages, {total} -> {new_total} chars")
+
+    return result
+
+
 app = Flask(__name__)
 
 
@@ -87,7 +195,7 @@ class AppConfig:
         self.llm_base_url = os.environ.get("LLM_BASE_URL", "http://localhost:8000")
         self.llm_api_key = os.environ.get("LLM_API_KEY", None)
         self.flask_port = int(os.environ.get("FLASK_PORT", "5001"))
-        self.max_tokens_cap = int(os.environ.get("MAX_TOKENS_CAP", "4096"))
+        self.max_tokens_cap = int(os.environ.get("MAX_TOKENS_CAP", "16384"))
 
     def update(self, llm_base_url=None, llm_api_key=None):
         if llm_base_url is not None:
@@ -250,47 +358,27 @@ def chat_completions():
         message = choice.get("message", {})
         response_text = message.get("content", "")
 
-        # Strip think tags
-        response_text, _ = strip_think_tags(response_text)
+        # Always try to parse tool calls from response (regardless of tools param)
+        tool_calls = mcp_to_openai_tool_calls(response_text)
 
-        if tools:
-            # Parse MCP tool calls
-            tool_calls = mcp_to_openai_tool_calls(response_text)
-            from .mcp_converter import strip_mcp_tags
-            text_content = strip_mcp_tags(response_text)
+        response = {
+            "id": llm_response.get("id", f"chatcmpl-{uuid.uuid4().hex[:8]}"),
+            "object": "chat.completion",
+            "created": llm_response.get("created", 0),
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": response_text,
+                },
+                "finish_reason": "tool_calls" if tool_calls else choice.get("finish_reason", "stop")
+            }],
+            "usage": llm_response.get("usage", {})
+        }
 
-            response = {
-                "id": llm_response.get("id", f"chatcmpl-{uuid.uuid4().hex[:8]}"),
-                "object": "chat.completion",
-                "created": llm_response.get("created", 0),
-                "model": model,
-                "choices": [{
-                    "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": text_content,
-                    },
-                    "finish_reason": "tool_calls" if tool_calls else choice.get("finish_reason", "stop")
-                }],
-                "usage": llm_response.get("usage", {})
-            }
-
-            if tool_calls:
-                response["choices"][0]["message"]["tool_calls"] = tool_calls
-        else:
-            # No tools - return cleaned response
-            response = {
-                "id": llm_response.get("id", f"chatcmpl-{uuid.uuid4().hex[:8]}"),
-                "object": "chat.completion",
-                "created": llm_response.get("created", 0),
-                "model": model,
-                "choices": [{
-                    "index": 0,
-                    "message": {"role": "assistant", "content": response_text},
-                    "finish_reason": choice.get("finish_reason", "stop")
-                }],
-                "usage": llm_response.get("usage", {})
-            }
+        if tool_calls:
+            response["choices"][0]["message"]["tool_calls"] = tool_calls
 
         # Log response
         log_debug("RESPONSE /v1/chat/completions", response)
@@ -344,6 +432,16 @@ def messages():
 
         # Convert to OpenAI format for backend
         openai_messages = convert_anthropic_messages_to_openai(messages)
+
+        # Truncate messages if they exceed context limit
+        original_count = len(openai_messages)
+        openai_messages = truncate_messages(openai_messages)
+        if len(openai_messages) < original_count:
+            log_debug("TRUNCATED messages", {
+                "original_count": original_count,
+                "new_count": len(openai_messages),
+                "new_chars": sum(len(str(m.get("content", ""))) for m in openai_messages)
+            })
 
         # Convert Anthropic tools to OpenAI format
         openai_tools = []
@@ -403,7 +501,6 @@ def messages():
 
                 llm_response = make_llm_request(payload, LLM_BASE_URL, LLM_API_KEY)
                 response_text = llm_response.get("choices", [{}])[0].get("message", {}).get("content", "")
-                response_text, _ = strip_think_tags(response_text)
 
                 # Check for search_tools call
                 tool_calls = extract_tool_calls_from_content(response_text)
@@ -451,9 +548,6 @@ def messages():
             llm_response = make_llm_request(payload, LLM_BASE_URL, LLM_API_KEY)
             response_text = llm_response.get("choices", [{}])[0].get("message", {}).get("content", "")
 
-        # Strip think tags from final response
-        response_text, _ = strip_think_tags(response_text)
-
         # Build response
         if tools:
             content_blocks = build_anthropic_content_blocks(response_text)
@@ -489,6 +583,11 @@ def messages():
         return jsonify(response)
 
     except Exception as e:
+        import traceback
+        error_trace = traceback.format_exc()
+        print(f"[ERROR] messages endpoint: {e}")
+        print(error_trace)
+        log_debug("ERROR /v1/messages", {"error": str(e), "traceback": error_trace})
         logger.exception("Error in messages endpoint")
         return create_error_response(str(e), is_anthropic=True)
 

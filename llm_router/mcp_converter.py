@@ -3,9 +3,15 @@ MCP XML format conversion utilities.
 
 This module handles conversion between:
 - OpenAI tools format -> MCP system prompt (for backend LLM)
-- MCP XML tool calls (<use_mcp_tool>) -> OpenAI/Anthropic tool_use format
+- Tool call XML/JSON -> OpenAI/Anthropic tool_use format
 
-The backend LLM (e.g., MiroThinker on SGLang) uses MCP XML format for tool calls.
+Supported tool call formats:
+- MCP XML: <use_mcp_tool><tool_name>...</tool_name><arguments>...</arguments></use_mcp_tool>
+- Tool call XML: <tool_call><tool_name>...</tool_name><arguments>...</arguments></tool_call>
+- Simple XML: <tool><function_name>...</function_name><arguments>...</arguments></tool>
+- JSON: {"name": "...", "arguments": {...}}
+
+The backend LLM may use any of these formats for tool calls.
 This module enables standard OpenAI/Anthropic API clients to work with such backends.
 """
 
@@ -163,8 +169,10 @@ def extract_tool_calls_from_content(response_text: str) -> list:
     """
     Extract all tool calls from response text.
 
-    Supports both MCP XML format and JSON format:
+    Supports multiple XML formats and JSON format:
     - MCP XML: <use_mcp_tool>...</use_mcp_tool>
+    - Tool call XML: <tool_call>...</tool_call>
+    - Simple XML: <tool>...</tool>
     - JSON: {"name": "tool", "arguments": {...}}
 
     Args:
@@ -180,7 +188,7 @@ def extract_tool_calls_from_content(response_text: str) -> list:
 
     tool_calls = []
 
-    # Try MCP XML format first
+    # Try MCP XML format first: <use_mcp_tool>...</use_mcp_tool>
     pattern = r'<use_mcp_tool>(.*?)</use_mcp_tool>'
     matches = re.findall(pattern, response_text, re.DOTALL)
 
@@ -200,11 +208,85 @@ def extract_tool_calls_from_content(response_text: str) -> list:
                 "arguments": arguments
             })
 
-    # If no MCP XML found, try JSON format
+    # Try <tool_call> XML format: <tool_call><tool_name>...</tool_name></tool_call>
+    if not tool_calls:
+        pattern = r'<tool_call>(.*?)</tool_call>'
+        matches = re.findall(pattern, response_text, re.DOTALL)
+
+        for content in matches:
+            tool_name = _extract_tool_name_from_xml(content)
+            arguments = _extract_arguments_from_xml(content)
+
+            if tool_name:
+                tool_calls.append({
+                    "server_name": "tools",
+                    "tool_name": tool_name,
+                    "arguments": arguments
+                })
+
+    # Try simple <tool> XML format: <tool><function_name>...</function_name></tool>
+    if not tool_calls:
+        pattern = r'<tool>(.*?)</tool>'
+        matches = re.findall(pattern, response_text, re.DOTALL)
+
+        for content in matches:
+            tool_name = _extract_tool_name_from_xml(content)
+            arguments = _extract_arguments_from_xml(content)
+
+            if tool_name:
+                tool_calls.append({
+                    "server_name": "tools",
+                    "tool_name": tool_name,
+                    "arguments": arguments
+                })
+
+    # Try generic XML format: <tag_name>...<arguments>...</arguments></tag_name>
+    # The tag name itself becomes the tool name (e.g., <next-step> -> tool_name: "next-step")
+    if not tool_calls:
+        # Match any XML tag that contains <arguments> inside
+        pattern = r'<([a-zA-Z][a-zA-Z0-9_-]*)>(.*?)</\1>'
+        matches = re.findall(pattern, response_text, re.DOTALL)
+
+        for tag_name, content in matches:
+            # Skip known wrapper tags that shouldn't be tool names
+            if tag_name in ['think', 'thinking', 'response', 'output', 'result']:
+                continue
+
+            arguments = _extract_arguments_from_xml(content)
+
+            # Only treat as tool call if it has arguments
+            if arguments:
+                tool_calls.append({
+                    "server_name": "tools",
+                    "tool_name": tag_name,
+                    "arguments": arguments
+                })
+
+    # If no XML found, try JSON format
     if not tool_calls:
         tool_calls.extend(_extract_json_tool_calls(response_text))
 
     return tool_calls
+
+
+def _extract_tool_name_from_xml(content: str) -> str | None:
+    """Extract tool name from XML content, trying multiple tag names."""
+    # Try various tool name tags
+    for tag in ['tool_name', 'function_name', 'name', 'function', 'action']:
+        match = re.search(rf'<{tag}>(.*?)</{tag}>', content, re.DOTALL)
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+def _extract_arguments_from_xml(content: str) -> dict:
+    """Extract arguments from XML content, trying multiple tag names."""
+    # Try various argument tags
+    for tag in ['arguments', 'parameters', 'input', 'params', 'args']:
+        match = re.search(rf'<{tag}>(.*?)</{tag}>', content, re.DOTALL)
+        if match:
+            return _parse_arguments(match.group(1))
+    return {}
 
 
 def _extract_json_tool_calls(response_text: str) -> list:
@@ -286,7 +368,7 @@ def strip_mcp_tags(response_text: str) -> str:
     """
     Remove tool call content from response text.
 
-    Handles both MCP XML format and JSON format tool calls.
+    Handles MCP XML, tool_call XML, simple XML, and JSON format tool calls.
 
     Args:
         response_text: Raw text with tool calls
@@ -296,6 +378,12 @@ def strip_mcp_tags(response_text: str) -> str:
     """
     # Remove MCP XML tags
     cleaned = re.sub(r'<use_mcp_tool>.*?</use_mcp_tool>', '', response_text, flags=re.DOTALL)
+
+    # Remove <tool_call> XML tags
+    cleaned = re.sub(r'<tool_call>.*?</tool_call>', '', cleaned, flags=re.DOTALL)
+
+    # Remove simple <tool> XML tags
+    cleaned = re.sub(r'<tool>.*?</tool>', '', cleaned, flags=re.DOTALL)
 
     # Remove JSON tool calls (find balanced braces containing "name" or "tool")
     def remove_json_tool_calls(text):
