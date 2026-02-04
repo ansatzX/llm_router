@@ -1,127 +1,16 @@
 # LLM Router
 
-A Flask-based API router for LLM backends, providing both **OpenAI** and **Anthropic** protocol support with automatic tool calling format conversion.
+A Flask-based API proxy that enables standard OpenAI/Anthropic API clients to work with LLM backends using MCP XML format for tool calls (e.g., MiroThinker on SGLang).
 
-## Overview
+## Features
 
-This router acts as a proxy between LLM backends (which may output MCP XML format for tool calls) and clients expecting standard OpenAI or Anthropic protocol formats. It automatically converts between these formats, enabling seamless integration with existing OpenAI and Anthropic client libraries.
-
-## Architecture
-
-```
-┌─────────────┐                 ┌──────────────────┐                 ┌──────────────┐
-│   Client    │                 │   LLM Router     │                 │  LLM Backend │
-│   (OpenAI   │ ─────────────▶  │                  │ ─────────────▶  │  (Any OpenAI │
-│  or Anthropic) │  HTTP/JSON │  Protocol Proxy   │  HTTP/JSON │   compatible)│
-└─────────────┘                 └──────────────────┘                 └──────────────┘
-                                    │                   │
-                                    │ MCP XML          │
-                                    │ Format Detection │
-                                    │ and Conversion   │
-                                    ▼                   ▼
-                            Native Protocol  ←─────  MCP XML
-                            Response Format       Output
-```
-
-## Protocol Comparison
-
-| Feature | OpenAI Protocol | Anthropic Protocol |
-|---------|-----------------|---------------------|
-| Endpoint | `/v1/chat/completions` | `/v1/messages` |
-| Auth Header | `Authorization: Bearer <key>` | `x-api-key: <key>` or `Authorization: Bearer <key>` |
-| Message Format | `{role, content, tool_calls?}` | `{role, content[]}` |
-| Content Type | String (text) | Array of blocks (text, image, tool_use) |
-| Tool Call Format | `message.tool_calls[]` array | `content[]` with `tool_use` blocks |
-| Tool Result Format | `{role: "tool", tool_call_id, content}` | `{role: "user", content: [{type: "tool_result", ...}]}` |
-| Streaming | Yes (`stream: true`) | Yes (`stream: true`) |
-
-## Unified Interface
-
-The router provides a unified interface `/v1/chat` that automatically detects the request format and routes it to the appropriate handler. This simplifies client implementation by supporting both OpenAI and Anthropic protocol formats through a single endpoint.
-
-## Tool Call Format Conversion
-
-### MCP XML Format (Input)
-
-LLM backends may output tool calls in XML format:
-
-```xml
-<use_mcp_tool>
-<server_name>my-tools</server_name>
-<tool_name>get_weather</tool_name>
-<arguments>
-{
-  "location": "London",
-  "unit": "celsius"
-}
-</arguments>
-</use_mcp_tool>
-```
-
-### OpenAI Format (Output)
-
-Converted to OpenAI's `tool_calls` array:
-
-```json
-{
-  "id": "chatcmpl-123",
-  "choices": [{
-    "message": {
-      "role": "assistant",
-      "content": "I'll check the weather for you.",
-      "tool_calls": [{
-        "id": "call_abc123",
-        "type": "function",
-        "function": {
-          "name": "get_weather",
-          "arguments": "{\"location\": \"London\", \"unit\": \"celsius\"}"
-        }
-      }]
-    },
-    "finish_reason": "tool_calls"
-  }]
-}
-```
-
-### Anthropic Format (Output)
-
-Converted to Anthropic's `tool_use` content blocks:
-
-```json
-{
-  "id": "msg_123",
-  "type": "message",
-  "role": "assistant",
-  "content": [
-    {
-      "type": "text",
-      "text": "I'll check the weather for you."
-    },
-    {
-      "type": "tool_use",
-      "id": "toolu_abc123",
-      "name": "get_weather",
-      "input": {
-        "location": "London",
-        "unit": "celsius"
-      }
-    }
-  ],
-  "stop_reason": "tool_use"
-}
-```
+- **Protocol Translation**: Accepts OpenAI and Anthropic API formats
+- **MCP Tool Conversion**: Converts API tools to MCP system prompt, parses `<use_mcp_tool>` responses back to standard formats
+- **Think Tag Handling**: Strips `<think>` reasoning tags from model output
+- **Content Validation**: Intercepts media content based on model capabilities (text vs multimodal)
+- **JSON Repair**: Handles malformed JSON in tool arguments
 
 ## Installation
-
-### Using UV (Recommended)
-
-```bash
-uv venv
-source .venv/bin/activate
-uv pip install -e .
-```
-
-### Using pip
 
 ```bash
 python -m venv .venv
@@ -131,73 +20,145 @@ pip install -e .
 
 ## Usage
 
-### Start the Router
-
 ```bash
-# Default port 5001 (5000 is used by AirPlay on macOS)
+# Start router
+export LLM_BASE_URL="http://your-llm-backend:8000"
 llm-router
 
-# Or specify LLM backend URL
-export LLM_BASE_URL=http://localhost:8000
-llm-router
+# Or with custom port
+FLASK_PORT=8080 llm-router
 
-# Or specify custom port
-export FLASK_PORT=8000
-llm-router
-```
+# Or with command line options
+llm-router --port 8080
 
-The router will start on `http://0.0.0.0:<port>` and proxy requests to the LLM backend.
-
-### Configuration
-
-Environment variables:
-
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `LLM_BASE_URL` | LLM backend URL | `http://localhost:8000` |
-| `LLM_API_KEY` | LLM API key (if required) | `None` |
-| `FLASK_PORT` | Port for the router | `5001` |
-| `MODEL_TYPE` | Model type: "text" or "multimodal" | "text" |
-| `MAX_UPLOAD_SIZE_MB` | Maximum file size for uploads | 10 |
-| `LLM_REQUEST_TIMEOUT` | Request timeout in seconds (not set = no timeout) | `None` |
-
-### Example with Real LLM API
-
-```bash
-# Set environment variables for your LLM backend
-export LLM_BASE_URL="http://10.27.130.30:32788"
-export LLM_API_KEY="your-api-key"
-
-# Run the router
-llm-router
-```
-
-## Project Structure
-
-```
-llm_router/                    # 主包
-├── __init__.py               # 包入口
-├── server.py                 # Flask 服务器和路由
-├── llm_client.py             # LLM 后端 HTTP 客户端
-├── mcp_converter.py          # MCP XML 格式转换工具
-└── model_config.py           # 模型配置和内容验证
-
-examples/                     # 示例代码
-tests/                        # 测试代码
-pyproject.toml               # 包配置
-README.md                    # 本文档
-.gitignore                   # Git 忽略文件
+# Enable debug logging to llm_router.log
+llm-router --debug
 ```
 
 ## API Endpoints
 
-- `POST /v1/chat` - 统一接口（自动检测协议格式）
-- `POST /v1/chat/completions` - OpenAI 协议端点
-- `POST /v1/messages` - Anthropic 协议端点
-- `GET /v1/models` - 模型列表
-- `GET /health` - 健康检查
-- `GET /` - API 信息
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/v1/chat/completions` | POST | OpenAI Chat Completions |
+| `/v1/messages` | POST | Anthropic Messages |
+| `/v1/chat` | POST | Unified (auto-detects format) |
+| `/v1/models` | GET | List available models |
+| `/health` | GET | Health check |
+
+## How It Works
+
+1. Client sends request with tools in OpenAI/Anthropic format
+2. Router generates MCP system prompt and injects it into messages
+3. Request forwarded to backend LLM (without tools parameter)
+4. Backend responds with `<use_mcp_tool>` XML in content
+5. Router parses XML and converts to standard API tool_use format
+6. Client receives standard OpenAI/Anthropic response
+
+### MCP XML Format
+
+The backend LLM uses this format for tool calls:
+
+```xml
+<use_mcp_tool>
+<server_name>tools</server_name>
+<tool_name>get_weather</tool_name>
+<arguments>{"location": "London"}</arguments>
+</use_mcp_tool>
+```
+
+This gets converted to:
+
+**OpenAI format:**
+```json
+{
+  "tool_calls": [{
+    "id": "call_xxx",
+    "type": "function",
+    "function": {
+      "name": "get_weather",
+      "arguments": "{\"location\": \"London\"}"
+    }
+  }]
+}
+```
+
+**Anthropic format:**
+```json
+{
+  "content": [{
+    "type": "tool_use",
+    "id": "toolu_xxx",
+    "name": "get_weather",
+    "input": {"location": "London"}
+  }]
+}
+```
+
+## Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LLM_BASE_URL` | `http://localhost:8000` | Backend LLM URL |
+| `LLM_API_KEY` | - | Backend API key (optional) |
+| `FLASK_PORT` | `5001` | Router port |
+| `MODEL_TYPE` | `text` | `text` or `multimodal` |
+| `MAX_TOKENS_CAP` | `4096` | Max completion tokens cap |
+| `MAX_TOOLS_CHARS` | `40000` | Max tools JSON size; skip MCP if exceeded |
+| `LLM_REQUEST_TIMEOUT` | - | Request timeout in seconds |
+
+## Project Structure
+
+```
+llm_router/
+  __init__.py       # Package entry, CLI
+  server.py         # Flask app, API endpoints
+  llm_client.py     # HTTP client for backend
+  mcp_converter.py  # MCP XML conversion
+  model_config.py   # Content validation
+tests/
+  test_mcp_converter.py  # Unit tests
+```
+
+## Testing
+
+```bash
+pytest
+pytest -v
+```
+
+## Example
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:5001/v1",
+    api_key="not-needed"
+)
+
+response = client.chat.completions.create(
+    model="MiroThinker",
+    messages=[{"role": "user", "content": "What's the weather in London?"}],
+    tools=[{
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "description": "Get weather for a location",
+            "parameters": {
+                "type": "object",
+                "properties": {"location": {"type": "string"}},
+                "required": ["location"]
+            }
+        }
+    }]
+)
+
+if response.choices[0].message.tool_calls:
+    tool_call = response.choices[0].message.tool_calls[0]
+    print(f"Tool: {tool_call.function.name}")
+    print(f"Args: {tool_call.function.arguments}")
+```
 
 ## License
 
-MIT License
+MIT

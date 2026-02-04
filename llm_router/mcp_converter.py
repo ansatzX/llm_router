@@ -1,37 +1,123 @@
 """
 MCP XML format conversion utilities.
 
-This module provides functions for parsing and converting MCP XML format
-tool calls to OpenAI and Anthropic protocol formats.
+This module handles conversion between:
+- OpenAI tools format -> MCP system prompt (for backend LLM)
+- MCP XML tool calls (<use_mcp_tool>) -> OpenAI/Anthropic tool_use format
 
-MCP XML Format (Input):
-    <use_mcp_tool>
-    <server_name>server name here</server_name>
-    <tool_name>tool name here</tool_name>
-    <arguments>{"key": "value"}</arguments>
-    </use_mcp_tool>
+The backend LLM (e.g., MiroThinker on SGLang) uses MCP XML format for tool calls.
+This module enables standard OpenAI/Anthropic API clients to work with such backends.
 """
 
 import json
 import re
 import uuid
+from json_repair import repair_json
+
+
+def generate_mcp_system_prompt(tools: list, server_name: str = "tools") -> str:
+    """
+    Generate MCP-style system prompt from OpenAI tools format.
+
+    This prompt instructs the LLM to use <use_mcp_tool> XML format for tool calls,
+    which can then be parsed and converted back to standard API formats.
+
+    Args:
+        tools: List of tools in OpenAI format [{"type": "function", "function": {...}}]
+        server_name: Server name to use in MCP format (default: "tools")
+
+    Returns:
+        System prompt string with MCP tool instructions, or empty string if no tools
+    """
+    if not tools:
+        return ""
+
+    prefix = """In this environment you have access to a set of tools you can use to answer the user's question.
+
+You only have access to the tools provided below. You can only use one tool per message, and will receive the result of that tool in the user's next response. You use tools step-by-step to accomplish a given task, with each tool-use informed by the result of the previous tool-use.
+
+# Tool-Use Formatting Instructions
+
+Tool-use is formatted using XML-style tags. The tool-use is enclosed in <use_mcp_tool></use_mcp_tool> and each parameter is similarly enclosed within its own set of tags.
+
+Parameters:
+- server_name: (required) The name of the MCP server providing the tool
+- tool_name: (required) The name of the tool to execute
+- arguments: (required) A JSON object containing the tool's input parameters
+
+Usage:
+<use_mcp_tool>
+<server_name>server name here</server_name>
+<tool_name>tool name here</tool_name>
+<arguments>
+{
+  "param1": "value1",
+  "param2": "value2"
+}
+</arguments>
+</use_mcp_tool>
+
+Important Notes:
+- Tool-use must be placed at the end of your response, top-level, and not nested within other tags.
+- Always adhere to this format for the tool use to ensure proper parsing and execution.
+
+Here are the functions available:
+
+"""
+
+    tools_section = []
+    for tool in tools:
+        if tool.get("type") == "function":
+            func = tool["function"]
+            tool_name = func.get("name", "unknown")
+            description = func.get("description", "")
+            parameters = func.get("parameters", {})
+            tools_section.append(
+                f"## Server: {server_name}\n"
+                f"### Tool: {tool_name}\n"
+                f"Description: {description}\n"
+                f"Input schema: {json.dumps(parameters, ensure_ascii=False)}\n"
+            )
+
+    return prefix + "\n".join(tools_section)
+
+
+def strip_think_tags(response_text: str) -> tuple[str, str]:
+    """
+    Extract and remove <think> tags from response text.
+
+    Some models (like MiroThinker) wrap reasoning in <think> tags.
+    This function removes them from the final output.
+
+    Args:
+        response_text: Raw text response from LLM
+
+    Returns:
+        Tuple of (cleaned_text, thinking_content)
+    """
+    thinking_content = ""
+    think_match = re.search(r'<think>(.*?)</think>', response_text, re.DOTALL)
+    if think_match:
+        thinking_content = think_match.group(1).strip()
+
+    cleaned = re.sub(r'<think>.*?</think>', '', response_text, flags=re.DOTALL)
+    return cleaned.strip(), thinking_content
 
 
 def is_anthropic_format(request_json: dict) -> bool:
     """
-    Determine if the request JSON is in Anthropic format or OpenAI format.
+    Detect if request is in Anthropic format vs OpenAI format.
 
     Key differences:
-    - Anthropic uses {"type": "image"} blocks with source.data for base64
-    - OpenAI uses {"type": "image_url"} blocks with image_url.url for base64
+    - Anthropic: {"type": "image"} blocks with source.data
+    - OpenAI: {"type": "image_url"} blocks with image_url.url
 
     Args:
-        request_json: The request JSON to analyze
+        request_json: The incoming request JSON
 
     Returns:
         True if Anthropic format, False if OpenAI format
     """
-    # Check messages content blocks
     messages = request_json.get("messages", [])
     for msg in messages:
         content = msg.get("content")
@@ -43,74 +129,52 @@ def is_anthropic_format(request_json: dict) -> bool:
                 elif block_type == "image_url":
                     return False
 
-    # If no content blocks with images, check other Anthropic-specific fields
+    # Check for Anthropic-style tools (name + input_schema instead of type: function)
     if "max_tokens" in request_json and "model" in request_json:
-        # Check for Anthropic-style tools
         if "tools" in request_json:
-            return True
+            tools = request_json["tools"]
+            if tools and "input_schema" in tools[0]:
+                return True
 
     return False
 
 
-def parse_mcp_tool_call(response_text: str) -> dict:
+def _parse_arguments(args_text: str) -> dict:
     """
-    Parse a single MCP-style tool call from response text.
+    Parse JSON arguments with fallback to json_repair for malformed JSON.
 
     Args:
-        response_text: The raw text response containing MCP XML tags
+        args_text: Raw arguments string from MCP XML
 
     Returns:
-        dict with keys: server_name, tool_name, arguments
-        None if no valid tool call is found
+        Parsed arguments dict, or empty dict on failure
     """
-    # Limit input size to prevent ReDoS
-    MAX_RESPONSE_SIZE = 10 * 1024 * 1024  # 10MB
-    if len(response_text) > MAX_RESPONSE_SIZE:
-        response_text = response_text[:MAX_RESPONSE_SIZE]
-
-    match = re.search(r'<use_mcp_tool>(.*?)</use_mcp_tool>', response_text, re.DOTALL)
-    if not match:
-        return None
-
-    content = match.group(1)
-    server_match = re.search(r'<server_name>(.*?)</server_name>', content, re.DOTALL)
-    tool_match = re.search(r'<tool_name>(.*?)</tool_name>', content, re.DOTALL)
-    args_match = re.search(r'<arguments>(.*?)</arguments>', content, re.DOTALL)
-
-    server_name = server_match.group(1).strip() if server_match else None
-    tool_name = tool_match.group(1).strip() if tool_match else None
-
-    if args_match:
+    try:
+        return json.loads(args_text.strip())
+    except json.JSONDecodeError:
         try:
-            arguments = json.loads(args_match.group(1).strip())
-        except json.JSONDecodeError:
-            arguments = {}
-    else:
-        arguments = {}
-
-    if server_name and tool_name:
-        return {
-            "server_name": server_name,
-            "tool_name": tool_name,
-            "arguments": arguments
-        }
-    return None
+            repaired = repair_json(args_text.strip())
+            return json.loads(repaired)
+        except Exception:
+            return {}
 
 
 def extract_tool_calls_from_content(response_text: str) -> list:
     """
-    Extract all MCP tool calls from the response text.
+    Extract all MCP tool calls from response text.
+
+    Parses <use_mcp_tool> XML blocks and extracts tool information.
 
     Args:
-        response_text: The raw text response containing MCP XML
+        response_text: Raw text response containing MCP XML
 
     Returns:
-        List of tool call dicts, each containing server_name, tool_name, arguments
+        List of dicts with keys: server_name, tool_name, arguments
     """
-    # Limit input size to prevent ReDoS
-    MAX_RESPONSE_SIZE = 10 * 1024 * 1024  # 10MB
-    if len(response_text) > MAX_RESPONSE_SIZE:
-        response_text = response_text[:MAX_RESPONSE_SIZE]
+    # Limit input size to prevent ReDoS attacks
+    MAX_SIZE = 10 * 1024 * 1024  # 10MB
+    if len(response_text) > MAX_SIZE:
+        response_text = response_text[:MAX_SIZE]
 
     tool_calls = []
     pattern = r'<use_mcp_tool>(.*?)</use_mcp_tool>'
@@ -123,14 +187,7 @@ def extract_tool_calls_from_content(response_text: str) -> list:
 
         server_name = server_match.group(1).strip() if server_match else None
         tool_name = tool_match.group(1).strip() if tool_match else None
-
-        if args_match:
-            try:
-                arguments = json.loads(args_match.group(1).strip())
-            except json.JSONDecodeError:
-                arguments = {}
-        else:
-            arguments = {}
+        arguments = _parse_arguments(args_match.group(1)) if args_match else {}
 
         if server_name and tool_name:
             tool_calls.append({
@@ -144,38 +201,34 @@ def extract_tool_calls_from_content(response_text: str) -> list:
 
 def strip_mcp_tags(response_text: str) -> str:
     """
-    Remove MCP XML tags from response text, leaving only the natural language content.
+    Remove MCP XML tags from response text.
 
     Args:
-        response_text: The raw text response containing MCP XML
+        response_text: Raw text with MCP XML tags
 
     Returns:
-        Cleaned text with MCP tags removed
+        Cleaned text with <use_mcp_tool> blocks removed
     """
-    # Remove all MCP tool call blocks
     cleaned = re.sub(r'<use_mcp_tool>.*?</use_mcp_tool>', '', response_text, flags=re.DOTALL)
     return cleaned.strip()
 
 
 def mcp_to_openai_tool_calls(response_text: str) -> list:
     """
-    Convert MCP XML format tool calls to OpenAI format.
+    Convert MCP XML tool calls to OpenAI format.
 
-    OpenAI Format:
+    OpenAI format:
         message.tool_calls = [{
             "id": "call_xxx",
             "type": "function",
-            "function": {
-                "name": "tool_name",
-                "arguments": '{"key": "value"}'
-            }
+            "function": {"name": "...", "arguments": "..."}
         }]
 
     Args:
-        response_text: The raw text response containing MCP XML
+        response_text: Raw text containing MCP XML
 
     Returns:
-        List of OpenAI tool_calls objects
+        List of OpenAI-format tool_calls
     """
     mcp_calls = extract_tool_calls_from_content(response_text)
     openai_calls = []
@@ -195,74 +248,64 @@ def mcp_to_openai_tool_calls(response_text: str) -> list:
 
 def mcp_to_anthropic_tool_use_blocks(response_text: str) -> list:
     """
-    Convert MCP XML format tool calls to Anthropic content blocks.
+    Convert MCP XML tool calls to Anthropic content blocks.
 
-    Anthropic Format:
+    Anthropic format:
         content = [{
             "type": "tool_use",
             "id": "toolu_xxx",
-            "name": "tool_name",
-            "input": {"key": "value"}
+            "name": "...",
+            "input": {...}
         }]
 
     Args:
-        response_text: The raw text response containing MCP XML
+        response_text: Raw text containing MCP XML
 
     Returns:
         List of Anthropic tool_use content blocks
     """
     mcp_calls = extract_tool_calls_from_content(response_text)
-    anthropic_blocks = []
+    blocks = []
 
     for call in mcp_calls:
-        anthropic_blocks.append({
+        blocks.append({
             "type": "tool_use",
             "id": f"toolu_{uuid.uuid4().hex[:8]}",
             "name": call["tool_name"],
             "input": call["arguments"]
         })
 
-    return anthropic_blocks
+    return blocks
 
 
 def build_anthropic_content_blocks(response_text: str) -> list:
     """
     Build complete Anthropic content blocks from response text.
 
-    This function creates a content array that includes both the text content
-    (with MCP tags removed) and any tool_use blocks.
+    Creates content array with text (MCP tags removed) and tool_use blocks.
 
     Args:
-        response_text: The raw text response containing MCP XML
+        response_text: Raw text containing MCP XML
 
     Returns:
         List of Anthropic content blocks (text and/or tool_use)
     """
     blocks = []
-
-    # Get tool use blocks
     tool_blocks = mcp_to_anthropic_tool_use_blocks(response_text)
-
-    # Get cleaned text content
     text_content = strip_mcp_tags(response_text)
 
-    # Add text block if there's any text content
     if text_content:
         blocks.append({"type": "text", "text": text_content})
 
-    # Add tool use blocks
     blocks.extend(tool_blocks)
-
     return blocks
 
 
 def convert_anthropic_messages_to_openai(messages: list) -> list:
     """
-    Convert Anthropic message format to OpenAI message format.
+    Convert Anthropic message format to OpenAI format.
 
-    This handles the different message structures between the two protocols:
-    - Anthropic: uses content array with text blocks and tool_result blocks
-    - OpenAI: uses content string and tool_calls array
+    Handles content arrays, image blocks, tool_use blocks, etc.
 
     Args:
         messages: List of messages in Anthropic format
@@ -275,41 +318,39 @@ def convert_anthropic_messages_to_openai(messages: list) -> list:
     for msg in messages:
         openai_msg = {"role": msg["role"]}
 
-        # Handle content conversion
         if isinstance(msg.get("content"), str):
-            # Simple string content
             openai_msg["content"] = msg["content"]
         elif isinstance(msg.get("content"), list):
-            # Content array - need to convert blocks
             content_blocks = msg["content"]
             text_parts = []
             tool_calls = []
 
             for block in content_blocks:
-                if block.get("type") == "text":
+                block_type = block.get("type", "")
+
+                if block_type == "text":
                     text_parts.append(block.get("text", ""))
-                elif block.get("type") == "image":
+
+                elif block_type == "image":
                     # Convert Anthropic image to OpenAI format
                     source = block.get("source", {})
                     if source.get("type") == "base64":
                         media_type = source.get("media_type", "image/png")
                         data = source.get("data", "")
-                        # Build data URL for OpenAI format
                         image_url = f"data:{media_type};base64,{data}"
-                        # For OpenAI format, we need to keep the image in the content array
-                        # Store it in a special format that the backend can understand
+
                         if "content" not in openai_msg:
                             openai_msg["content"] = []
                         if not isinstance(openai_msg["content"], list):
-                            # Convert string to array
-                            current_content = openai_msg["content"]
-                            openai_msg["content"] = [{"type": "text", "text": current_content}] if current_content else []
+                            current = openai_msg["content"]
+                            openai_msg["content"] = [{"type": "text", "text": current}] if current else []
+
                         openai_msg["content"].append({
                             "type": "image_url",
                             "image_url": {"url": image_url}
                         })
-                elif block.get("type") == "tool_use":
-                    # Convert tool_use to OpenAI tool_call format
+
+                elif block_type == "tool_use":
                     tool_calls.append({
                         "id": block.get("id", ""),
                         "type": "function",
@@ -318,29 +359,21 @@ def convert_anthropic_messages_to_openai(messages: list) -> list:
                             "arguments": json.dumps(block.get("input", {}))
                         }
                     })
-                elif block.get("type") == "tool_result":
-                    # Convert tool_result to assistant message with tool_call_id
-                    # For now, we'll treat this as a user message with the result
+
+                elif block_type == "tool_result":
                     if isinstance(block.get("content"), str):
                         text_parts.append(f"Tool result: {block.get('content')}")
 
-            # Handle content setting
-            # If content is already a list (from image processing), keep it
-            # Otherwise, create content from text_parts
+            # Set content
             if isinstance(openai_msg.get("content"), list):
-                # Content is already a list (contains image_url or other blocks)
-                # Add text parts as a text block if there are any
                 if text_parts:
                     text_content = "\n".join(text_parts)
                     openai_msg["content"].insert(0, {"type": "text", "text": text_content})
             elif text_parts:
-                # Only text parts, no list content
                 openai_msg["content"] = "\n".join(text_parts)
             else:
-                # No content at all
                 openai_msg["content"] = ""
 
-            # Add tool_calls if present
             if tool_calls and msg["role"] == "assistant":
                 openai_msg["tool_calls"] = tool_calls
 
