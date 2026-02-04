@@ -25,6 +25,9 @@ from .mcp_converter import (
     build_anthropic_content_blocks,
     convert_anthropic_messages_to_openai,
     generate_mcp_system_prompt,
+    generate_lazy_mcp_prompt,
+    get_tool_definitions_by_names,
+    extract_tool_calls_from_content,
     strip_think_tags,
     is_anthropic_format,
 )
@@ -45,8 +48,10 @@ FLASK_PORT = int(os.environ.get("FLASK_PORT", "5001"))
 # Max tokens cap - prevents requests exceeding model context length
 MAX_TOKENS_CAP = int(os.environ.get("MAX_TOKENS_CAP", "4096"))
 # Max tools definition size in characters (roughly 4 chars per token)
-# If tools exceed this, skip MCP prompt to avoid context overflow
+# If tools exceed this, use lazy loading instead of full MCP prompt
 MAX_TOOLS_CHARS = int(os.environ.get("MAX_TOOLS_CHARS", "40000"))
+# Max rounds for search_tools internal loop
+MAX_TOOL_SEARCH_ROUNDS = int(os.environ.get("MAX_TOOL_SEARCH_ROUNDS", "20"))
 
 # Debug mode for detailed logging
 DEBUG_MODE = False
@@ -299,7 +304,7 @@ def chat_completions():
 
 @app.route('/v1/messages', methods=['POST'])
 def messages():
-    """Anthropic Messages API endpoint."""
+    """Anthropic Messages API endpoint with lazy tool loading."""
     try:
         data = request.get_json()
 
@@ -362,9 +367,11 @@ def messages():
             "max_tokens": max_tokens,
         }
 
-        # Inject MCP system prompt if tools provided and not too large
-        # Skip if tools would overflow model context
-        if openai_tools and tools_chars < MAX_TOOLS_CHARS:
+        # Decide: full MCP prompt or lazy loading
+        use_lazy_loading = openai_tools and tools_chars >= MAX_TOOLS_CHARS
+
+        if openai_tools and not use_lazy_loading:
+            # Normal mode: inject full MCP prompt
             mcp_prompt = generate_mcp_system_prompt(openai_tools)
             if mcp_prompt:
                 if openai_messages and openai_messages[0].get("role") == "system":
@@ -372,26 +379,90 @@ def messages():
                 else:
                     openai_messages.insert(0, {"role": "system", "content": mcp_prompt})
             payload["messages"] = openai_messages
-        elif tools_chars >= MAX_TOOLS_CHARS:
-            print(f"[Anthropic] Skipping MCP prompt: tools_chars={tools_chars} >= MAX_TOOLS_CHARS={MAX_TOOLS_CHARS}")
 
-        # Forward to backend
-        llm_response = make_llm_request(payload, LLM_BASE_URL, LLM_API_KEY)
+            # Forward to backend
+            llm_response = make_llm_request(payload, LLM_BASE_URL, LLM_API_KEY)
+            response_text = llm_response.get("choices", [{}])[0].get("message", {}).get("content", "")
 
-        # Process response
-        choice = llm_response.get("choices", [{}])[0]
-        message = choice.get("message", {})
-        response_text = message.get("content", "")
+        elif use_lazy_loading:
+            # Lazy loading mode: internal loop for search_tools
+            print(f"[Anthropic] Using lazy loading: tools_chars={tools_chars}")
 
-        # Strip think tags
+            # Inject lazy MCP prompt (tool names only + search_tools)
+            lazy_prompt = generate_lazy_mcp_prompt(openai_tools)
+            if openai_messages and openai_messages[0].get("role") == "system":
+                openai_messages[0]["content"] = lazy_prompt + "\n\n" + openai_messages[0]["content"]
+            else:
+                openai_messages.insert(0, {"role": "system", "content": lazy_prompt})
+            payload["messages"] = openai_messages
+
+            # Internal loop
+            response_text = ""
+            for round_num in range(MAX_TOOL_SEARCH_ROUNDS):
+                print(f"[Anthropic] Lazy loading round {round_num + 1}/{MAX_TOOL_SEARCH_ROUNDS}")
+
+                llm_response = make_llm_request(payload, LLM_BASE_URL, LLM_API_KEY)
+                response_text = llm_response.get("choices", [{}])[0].get("message", {}).get("content", "")
+                response_text, _ = strip_think_tags(response_text)
+
+                # Check for search_tools call
+                tool_calls = extract_tool_calls_from_content(response_text)
+                search_calls = [c for c in tool_calls if c["tool_name"] == "search_tools"]
+
+                if not search_calls:
+                    # No search_tools call - exit loop
+                    print(f"[Anthropic] Lazy loading complete at round {round_num + 1}")
+                    break
+
+                # Process search_tools call
+                search_call = search_calls[0]
+                requested_names = search_call["arguments"].get("tool_names", [])
+                print(f"[Anthropic] search_tools requested: {requested_names}")
+
+                # Get tool definitions
+                tool_defs = get_tool_definitions_by_names(openai_tools, requested_names)
+
+                # Append assistant message and tool result to conversation
+                payload["messages"].append({
+                    "role": "assistant",
+                    "content": response_text
+                })
+                payload["messages"].append({
+                    "role": "user",
+                    "content": f"[Tool definitions for: {', '.join(requested_names)}]\n\n{tool_defs}\n\nNow you can use these tools. Proceed with your task."
+                })
+
+                log_debug(f"SEARCH_TOOLS round {round_num + 1}", {
+                    "requested": requested_names,
+                    "definitions": tool_defs[:500] + "..." if len(tool_defs) > 500 else tool_defs
+                })
+            else:
+                # Max rounds exceeded
+                print(f"[Anthropic] Max rounds exceeded ({MAX_TOOL_SEARCH_ROUNDS})")
+                payload["messages"].append({
+                    "role": "user",
+                    "content": "No suitable tool found after maximum search attempts. Please respond without using tools."
+                })
+                llm_response = make_llm_request(payload, LLM_BASE_URL, LLM_API_KEY)
+                response_text = llm_response.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+        else:
+            # No tools - just forward
+            llm_response = make_llm_request(payload, LLM_BASE_URL, LLM_API_KEY)
+            response_text = llm_response.get("choices", [{}])[0].get("message", {}).get("content", "")
+
+        # Strip think tags from final response
         response_text, _ = strip_think_tags(response_text)
 
+        # Build response
         if tools:
-            # Build Anthropic content blocks
             content_blocks = build_anthropic_content_blocks(response_text)
             tool_blocks = [b for b in content_blocks if b.get("type") == "tool_use"]
-            stop_reason = "tool_use" if tool_blocks else choice.get("finish_reason", "stop")
+            # Filter out search_tools from response (internal use only)
+            tool_blocks = [b for b in tool_blocks if b.get("name") != "search_tools"]
+            content_blocks = [b for b in content_blocks if b.get("type") != "tool_use" or b.get("name") != "search_tools"]
 
+            stop_reason = "tool_use" if tool_blocks else "end_turn"
             response = {
                 "id": f"msg_{uuid.uuid4().hex[:8]}",
                 "type": "message",
@@ -402,14 +473,13 @@ def messages():
                 "usage": llm_response.get("usage", {"input_tokens": 0, "output_tokens": 0})
             }
         else:
-            # No tools - return cleaned response
             response = {
                 "id": f"msg_{uuid.uuid4().hex[:8]}",
                 "type": "message",
                 "role": "assistant",
                 "content": [{"type": "text", "text": response_text}],
                 "model": model,
-                "stop_reason": choice.get("finish_reason", "stop"),
+                "stop_reason": "end_turn",
                 "usage": llm_response.get("usage", {"input_tokens": 0, "output_tokens": 0})
             }
 

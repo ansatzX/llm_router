@@ -6,6 +6,7 @@ A Flask-based API proxy that enables standard OpenAI/Anthropic API clients to wo
 
 - **Protocol Translation**: Accepts OpenAI and Anthropic API formats
 - **MCP Tool Conversion**: Converts API tools to MCP system prompt, parses `<use_mcp_tool>` responses back to standard formats
+- **Lazy Tool Loading**: When tools exceed context limit, uses progressive loading via `search_tools`
 - **Think Tag Handling**: Strips `<think>` reasoning tags from model output
 - **Content Validation**: Intercepts media content based on model capabilities (text vs multimodal)
 - **JSON Repair**: Handles malformed JSON in tool arguments
@@ -103,8 +104,33 @@ This gets converted to:
 | `FLASK_PORT` | `5001` | Router port |
 | `MODEL_TYPE` | `text` | `text` or `multimodal` |
 | `MAX_TOKENS_CAP` | `4096` | Max completion tokens cap |
-| `MAX_TOOLS_CHARS` | `40000` | Max tools JSON size; skip MCP if exceeded |
+| `MAX_TOOLS_CHARS` | `40000` | Threshold for lazy tool loading |
+| `MAX_TOOL_SEARCH_ROUNDS` | `20` | Max rounds for search_tools loop |
 | `LLM_REQUEST_TIMEOUT` | - | Request timeout in seconds |
+
+## Lazy Tool Loading
+
+When tools exceed `MAX_TOOLS_CHARS`, the router uses lazy loading:
+
+1. Model sees only tool names (not full definitions) + `search_tools`
+2. Model calls `search_tools(["Read", "Write"])` to get definitions
+3. Router returns definitions, model continues
+4. This loop runs internally (invisible to client)
+5. When model calls a real tool, response is returned to client
+
+```
+Client: "Read file.txt"
+    ↓
+Router: Inject tool names + search_tools
+    ↓
+┌─────────────────────────────────────┐
+│  Internal Loop (client doesn't see) │
+│  Round 1: Model calls search_tools  │
+│  Round 2: Model calls Read          │
+└─────────────────────────────────────┘
+    ↓
+Client: Receives Read tool call
+```
 
 ## Project Structure
 

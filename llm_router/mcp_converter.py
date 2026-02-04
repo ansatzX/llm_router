@@ -161,12 +161,14 @@ def _parse_arguments(args_text: str) -> dict:
 
 def extract_tool_calls_from_content(response_text: str) -> list:
     """
-    Extract all MCP tool calls from response text.
+    Extract all tool calls from response text.
 
-    Parses <use_mcp_tool> XML blocks and extracts tool information.
+    Supports both MCP XML format and JSON format:
+    - MCP XML: <use_mcp_tool>...</use_mcp_tool>
+    - JSON: {"name": "tool", "arguments": {...}}
 
     Args:
-        response_text: Raw text response containing MCP XML
+        response_text: Raw text response containing tool calls
 
     Returns:
         List of dicts with keys: server_name, tool_name, arguments
@@ -177,6 +179,8 @@ def extract_tool_calls_from_content(response_text: str) -> list:
         response_text = response_text[:MAX_SIZE]
 
     tool_calls = []
+
+    # Try MCP XML format first
     pattern = r'<use_mcp_tool>(.*?)</use_mcp_tool>'
     matches = re.findall(pattern, response_text, re.DOTALL)
 
@@ -196,20 +200,142 @@ def extract_tool_calls_from_content(response_text: str) -> list:
                 "arguments": arguments
             })
 
+    # If no MCP XML found, try JSON format
+    if not tool_calls:
+        tool_calls.extend(_extract_json_tool_calls(response_text))
+
+    return tool_calls
+
+
+def _extract_json_tool_calls(response_text: str) -> list:
+    """
+    Extract JSON format tool calls from response text.
+
+    Handles formats like:
+    - {"name": "Read", "arguments": {...}}
+    - {"tool": "Read", "input": {...}}
+
+    Args:
+        response_text: Raw text response
+
+    Returns:
+        List of tool call dicts
+    """
+    tool_calls = []
+
+    # Find all potential JSON objects by matching balanced braces
+    def find_json_objects(text):
+        objects = []
+        i = 0
+        while i < len(text):
+            if text[i] == '{':
+                # Find matching closing brace
+                depth = 1
+                start = i
+                i += 1
+                while i < len(text) and depth > 0:
+                    if text[i] == '{':
+                        depth += 1
+                    elif text[i] == '}':
+                        depth -= 1
+                    i += 1
+                if depth == 0:
+                    objects.append(text[start:i])
+            else:
+                i += 1
+        return objects
+
+    json_candidates = find_json_objects(response_text)
+
+    for candidate in json_candidates:
+        # Check if it looks like a tool call
+        if '"name"' not in candidate and '"tool"' not in candidate:
+            continue
+
+        try:
+            obj = json.loads(candidate)
+        except json.JSONDecodeError:
+            try:
+                repaired = repair_json(candidate)
+                obj = json.loads(repaired)
+            except Exception:
+                continue
+
+        # Must be a dict
+        if not isinstance(obj, dict):
+            continue
+
+        # Extract tool name and arguments
+        tool_name = obj.get("name") or obj.get("tool") or obj.get("tool_name")
+        arguments = obj.get("arguments") or obj.get("input") or obj.get("params") or {}
+
+        if isinstance(arguments, str):
+            arguments = _parse_arguments(arguments)
+
+        if tool_name and isinstance(tool_name, str):
+            tool_calls.append({
+                "server_name": "tools",
+                "tool_name": tool_name,
+                "arguments": arguments if isinstance(arguments, dict) else {}
+            })
+
     return tool_calls
 
 
 def strip_mcp_tags(response_text: str) -> str:
     """
-    Remove MCP XML tags from response text.
+    Remove tool call content from response text.
+
+    Handles both MCP XML format and JSON format tool calls.
 
     Args:
-        response_text: Raw text with MCP XML tags
+        response_text: Raw text with tool calls
 
     Returns:
-        Cleaned text with <use_mcp_tool> blocks removed
+        Cleaned text with tool call blocks removed
     """
+    # Remove MCP XML tags
     cleaned = re.sub(r'<use_mcp_tool>.*?</use_mcp_tool>', '', response_text, flags=re.DOTALL)
+
+    # Remove JSON tool calls (find balanced braces containing "name" or "tool")
+    def remove_json_tool_calls(text):
+        result = []
+        i = 0
+        while i < len(text):
+            if text[i] == '{':
+                # Find matching closing brace
+                depth = 1
+                start = i
+                i += 1
+                while i < len(text) and depth > 0:
+                    if text[i] == '{':
+                        depth += 1
+                    elif text[i] == '}':
+                        depth -= 1
+                    i += 1
+                if depth == 0:
+                    json_str = text[start:i]
+                    # Check if it's a tool call JSON
+                    if '"name"' in json_str or '"tool"' in json_str:
+                        try:
+                            obj = json.loads(json_str)
+                            if isinstance(obj, dict) and (obj.get("name") or obj.get("tool")):
+                                # Skip this JSON (don't add to result)
+                                continue
+                        except:
+                            pass
+                    result.append(json_str)
+                else:
+                    result.append(text[start:i])
+            else:
+                result.append(text[i])
+                i += 1
+        return ''.join(result)
+
+    cleaned = remove_json_tool_calls(cleaned)
+
+    # Clean up extra whitespace
+    cleaned = re.sub(r'\n\s*\n\s*\n', '\n\n', cleaned)
     return cleaned.strip()
 
 
@@ -380,3 +506,141 @@ def convert_anthropic_messages_to_openai(messages: list) -> list:
         openai_messages.append(openai_msg)
 
     return openai_messages
+
+
+# search_tools 的完整定义
+SEARCH_TOOLS_DEFINITION = {
+    "type": "function",
+    "function": {
+        "name": "search_tools",
+        "description": "获取工具的完整定义和参数。在使用任何工具前，必须先用此工具获取该工具的详细信息。可以一次查询多个工具，也可以多次调用直到找到合适的工具。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "tool_names": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "要查询的工具名称列表"
+                }
+            },
+            "required": ["tool_names"]
+        }
+    }
+}
+
+
+def generate_lazy_mcp_prompt(tools: list, server_name: str = "tools") -> str:
+    """
+    Generate MCP prompt with only tool names + search_tools definition.
+
+    This enables lazy loading of tool definitions - model sees all available
+    tool names but must use search_tools to get full definitions before use.
+
+    Args:
+        tools: List of tools in OpenAI format
+        server_name: Server name for MCP format
+
+    Returns:
+        System prompt with tool names list and search_tools definition
+    """
+    if not tools:
+        return ""
+
+    # Extract tool names
+    tool_names = []
+    for tool in tools:
+        if tool.get("type") == "function":
+            name = tool["function"].get("name", "unknown")
+            tool_names.append(name)
+
+    prompt = """In this environment you have access to a set of tools you can use to answer the user's question.
+
+# Tool-Use Formatting Instructions
+
+Tool-use is formatted using XML-style tags:
+
+<use_mcp_tool>
+<server_name>tools</server_name>
+<tool_name>tool name here</tool_name>
+<arguments>
+{"param1": "value1", "param2": "value2"}
+</arguments>
+</use_mcp_tool>
+
+Important: Tool-use must be placed at the end of your response.
+
+# Available Tools (names only)
+
+The following tools are available. You MUST use search_tools to get a tool's full definition before using it:
+
+"""
+
+    # Add tool names as a list
+    for name in tool_names:
+        prompt += f"- {name}\n"
+
+    # Add search_tools full definition
+    search_func = SEARCH_TOOLS_DEFINITION["function"]
+    prompt += f"""
+# Tool Discovery
+
+To use any tool above, first get its definition:
+
+## Tool: search_tools
+Description: {search_func["description"]}
+Input schema: {json.dumps(search_func["parameters"], ensure_ascii=False)}
+
+Example - get definitions for Read and Write tools:
+<use_mcp_tool>
+<server_name>tools</server_name>
+<tool_name>search_tools</tool_name>
+<arguments>
+{{"tool_names": ["Read", "Write"]}}
+</arguments>
+</use_mcp_tool>
+"""
+
+    return prompt
+
+
+def get_tool_definitions_by_names(tools: list, names: list, server_name: str = "tools") -> str:
+    """
+    Get full definitions for specified tools by name.
+
+    Args:
+        tools: List of all tools in OpenAI format
+        names: List of tool names to get definitions for
+        server_name: Server name for formatting
+
+    Returns:
+        Formatted string with full tool definitions
+    """
+    result_parts = []
+    names_set = set(names)
+    found_names = set()
+
+    for tool in tools:
+        if tool.get("type") == "function":
+            func = tool["function"]
+            tool_name = func.get("name", "")
+
+            if tool_name in names_set:
+                found_names.add(tool_name)
+                description = func.get("description", "")
+                parameters = func.get("parameters", {})
+
+                result_parts.append(
+                    f"## Tool: {tool_name}\n"
+                    f"Description: {description}\n"
+                    f"Input schema: {json.dumps(parameters, ensure_ascii=False)}\n"
+                )
+
+    # Report not found tools
+    not_found = names_set - found_names
+    if not_found:
+        result_parts.append(f"\n[Not found: {', '.join(not_found)}]")
+
+    if not result_parts:
+        return "No matching tools found."
+
+    return "\n".join(result_parts)
