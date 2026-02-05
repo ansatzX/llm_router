@@ -11,6 +11,8 @@ A Flask-based API proxy that enables standard OpenAI/Anthropic API clients to wo
 - **Think Tag Handling**: Strips `<think>` reasoning tags from model output
 - **Content Validation**: Intercepts media content based on model capabilities (text vs multimodal)
 - **JSON Repair**: Handles malformed JSON in tool arguments
+- **vLLM/SGLang Support**: Non-standard parameters (e.g., `repetition_penalty`, `top_k`) passed via `extra_body`
+- **Non-Streaming**: Streaming disabled internally (router requires full response for tool parsing)
 
 ## Installation
 
@@ -145,6 +147,36 @@ All formats are converted to standard API responses:
 | `MAX_CONTEXT_CHARS` | `800000` | Max message content chars (~200k tokens) |
 | `LLM_REQUEST_TIMEOUT` | - | Request timeout in seconds |
 
+## vLLM/SGLang Parameters
+
+The router automatically handles non-standard parameters used by vLLM/SGLang backends:
+
+- **Standard OpenAI parameters** (e.g., `temperature`, `top_p`, `max_tokens`) are passed directly
+- **Non-standard parameters** (e.g., `repetition_penalty`, `top_k`, `min_p`) are passed via `extra_body`
+- **Streaming is disabled** internally - the router needs full responses for MCP tool parsing
+
+Example request with vLLM parameters:
+```json
+{
+  "model": "model-name",
+  "messages": [...],
+  "temperature": 0.7,
+  "repetition_penalty": 1.05,
+  "top_k": 50
+}
+```
+
+The router will send to backend:
+```python
+client.chat.completions.create(
+    model="model-name",
+    messages=[...],
+    temperature=0.7,
+    stream=False,  # forced
+    extra_body={"repetition_penalty": 1.05, "top_k": 50}
+)
+```
+
 ## Message Truncation
 
 When conversation history exceeds `MAX_CONTEXT_CHARS`, the router automatically truncates messages:
@@ -206,7 +238,8 @@ llm_router/
 ├── server.py          # Flask endpoints, lazy loading logic
 ├── mcp_converter.py   # MCP/JSON parsing, format conversion
 ├── llm_client.py      # OpenAI client for backend requests
-└── model_config.py    # Content validation (text/multimodal)
+├── model_config.py    # Content validation (text/multimodal)
+└── debug_log.py       # Debug logging utilities
 tests/
 └── test_mcp_converter.py  # Unit tests
 ```
@@ -219,10 +252,33 @@ Enable debug logging to see full request/response details:
 llm-router --debug
 ```
 
-This creates `llm_router.log` with:
-- Full request payloads (messages, tools)
-- Response content
-- Lazy loading rounds and search_tools calls
+This creates `llm_router.log` with 4 types of entries:
+
+| Log Type | Description |
+|----------|-------------|
+| `CLIENT_REQUEST` | Original request from client (OpenAI/Anthropic format) |
+| `LLM_REQUEST` | Request sent to LLM backend (after MCP prompt injection) |
+| `LLM_RESPONSE` | Raw response from LLM backend |
+| `CLIENT_RESPONSE` | Final response sent to client (after tool parsing) |
+
+Example log:
+```
+================================================================================
+[2026-02-05 22:00:00] CLIENT_REQUEST /v1/messages
+{ "model": "...", "messages": [...], "stream": true, ... }
+
+================================================================================
+[2026-02-05 22:00:00] LLM_REQUEST
+{ "base_url": "...", "model": "...", "openai_params": {...}, "extra_params": {...} }
+
+================================================================================
+[2026-02-05 22:00:01] LLM_RESPONSE
+{ "id": "...", "choices": [...], "usage": {...} }
+
+================================================================================
+[2026-02-05 22:00:01] CLIENT_RESPONSE /v1/messages
+{ "id": "...", "content": [...], "stop_reason": "..." }
+```
 
 ## Testing
 
