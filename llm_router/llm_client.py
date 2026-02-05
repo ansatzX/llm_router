@@ -5,6 +5,8 @@ This module provides functions for making HTTP requests to the LLM backend.
 """
 
 import os
+from urllib.parse import urlparse
+
 from openai import OpenAI
 
 from .debug_log import log_debug
@@ -49,9 +51,14 @@ def make_llm_request(payload: dict, llm_base_url: str, api_key: str = None) -> d
     Raises:
         Exception: If the request fails
     """
-    # Normalize base_url: ensure it ends with /v1 for OpenAI client compatibility
+    # Normalize base_url for OpenAI client compatibility
+    # - If URL has no path (or just /), append /v1
+    # - If URL already has a path (e.g., /v1 or /api/v3), keep as is
     base_url = llm_base_url.rstrip("/")
-    if not base_url.endswith("/v1"):
+    parsed = urlparse(base_url)
+
+    # Only append /v1 if path is empty
+    if not parsed.path or parsed.path == "/":
         base_url = f"{base_url}/v1"
 
     client = OpenAI(
