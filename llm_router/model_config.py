@@ -8,9 +8,7 @@ This module provides functionality for:
 """
 
 import os
-import base64
-import mimetypes
-from typing import Optional, Tuple, Dict, Any, Literal
+from typing import Optional, Tuple, Literal
 
 
 # Valid model types

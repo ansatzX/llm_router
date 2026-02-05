@@ -188,73 +188,46 @@ def extract_tool_calls_from_content(response_text: str) -> list:
 
     tool_calls = []
 
-    # Try MCP XML format first: <use_mcp_tool>...</use_mcp_tool>
-    pattern = r'<use_mcp_tool>(.*?)</use_mcp_tool>'
-    matches = re.findall(pattern, response_text, re.DOTALL)
+    # XML patterns to try in order: (pattern, has_server_name)
+    XML_PATTERNS = [
+        (r'<use_mcp_tool>(.*?)</use_mcp_tool>', True),   # MCP format
+        (r'<tool_call>(.*?)</tool_call>', False),        # tool_call format
+        (r'<tool>(.*?)</tool>', False),                  # simple tool format
+    ]
 
-    for content in matches:
-        server_match = re.search(r'<server_name>(.*?)</server_name>', content, re.DOTALL)
-        tool_match = re.search(r'<tool_name>(.*?)</tool_name>', content, re.DOTALL)
-        args_match = re.search(r'<arguments>(.*?)</arguments>', content, re.DOTALL)
-
-        server_name = server_match.group(1).strip() if server_match else None
-        tool_name = tool_match.group(1).strip() if tool_match else None
-        arguments = _parse_arguments(args_match.group(1)) if args_match else {}
-
-        if server_name and tool_name:
-            tool_calls.append({
-                "server_name": server_name,
-                "tool_name": tool_name,
-                "arguments": arguments
-            })
-
-    # Try <tool_call> XML format: <tool_call><tool_name>...</tool_name></tool_call>
-    if not tool_calls:
-        pattern = r'<tool_call>(.*?)</tool_call>'
+    for pattern, has_server in XML_PATTERNS:
         matches = re.findall(pattern, response_text, re.DOTALL)
-
         for content in matches:
-            tool_name = _extract_tool_name_from_xml(content)
-            arguments = _extract_arguments_from_xml(content)
+            if has_server:
+                server_match = re.search(r'<server_name>(.*?)</server_name>', content, re.DOTALL)
+                server_name = server_match.group(1).strip() if server_match else "tools"
+                tool_match = re.search(r'<tool_name>(.*?)</tool_name>', content, re.DOTALL)
+                tool_name = tool_match.group(1).strip() if tool_match else None
+                args_match = re.search(r'<arguments>(.*?)</arguments>', content, re.DOTALL)
+                arguments = _parse_arguments(args_match.group(1)) if args_match else {}
+            else:
+                server_name = "tools"
+                tool_name = _extract_tool_name_from_xml(content)
+                arguments = _extract_arguments_from_xml(content)
 
             if tool_name:
                 tool_calls.append({
-                    "server_name": "tools",
+                    "server_name": server_name,
                     "tool_name": tool_name,
                     "arguments": arguments
                 })
-
-    # Try simple <tool> XML format: <tool><function_name>...</function_name></tool>
-    if not tool_calls:
-        pattern = r'<tool>(.*?)</tool>'
-        matches = re.findall(pattern, response_text, re.DOTALL)
-
-        for content in matches:
-            tool_name = _extract_tool_name_from_xml(content)
-            arguments = _extract_arguments_from_xml(content)
-
-            if tool_name:
-                tool_calls.append({
-                    "server_name": "tools",
-                    "tool_name": tool_name,
-                    "arguments": arguments
-                })
+        if tool_calls:
+            break
 
     # Try generic XML format: <tag_name>...<arguments>...</arguments></tag_name>
-    # The tag name itself becomes the tool name (e.g., <next-step> -> tool_name: "next-step")
     if not tool_calls:
-        # Match any XML tag that contains <arguments> inside
         pattern = r'<([a-zA-Z][a-zA-Z0-9_-]*)>(.*?)</\1>'
         matches = re.findall(pattern, response_text, re.DOTALL)
 
         for tag_name, content in matches:
-            # Skip known wrapper tags that shouldn't be tool names
             if tag_name in ['think', 'thinking', 'response', 'output', 'result']:
                 continue
-
             arguments = _extract_arguments_from_xml(content)
-
-            # Only treat as tool call if it has arguments
             if arguments:
                 tool_calls.append({
                     "server_name": "tools",
@@ -427,69 +400,38 @@ def strip_mcp_tags(response_text: str) -> str:
     return cleaned.strip()
 
 
-def mcp_to_openai_tool_calls(response_text: str) -> list:
-    """
-    Convert MCP XML tool calls to OpenAI format.
-
-    OpenAI format:
-        message.tool_calls = [{
-            "id": "call_xxx",
-            "type": "function",
-            "function": {"name": "...", "arguments": "..."}
-        }]
-
-    Args:
-        response_text: Raw text containing MCP XML
-
-    Returns:
-        List of OpenAI-format tool_calls
-    """
+def _mcp_to_tool_calls(response_text: str, format: str) -> list:
+    """Internal: convert MCP XML to OpenAI or Anthropic format."""
     mcp_calls = extract_tool_calls_from_content(response_text)
-    openai_calls = []
-
+    result = []
     for call in mcp_calls:
-        openai_calls.append({
-            "id": f"call_{uuid.uuid4().hex[:8]}",
-            "type": "function",
-            "function": {
+        if format == "openai":
+            result.append({
+                "id": f"call_{uuid.uuid4().hex[:8]}",
+                "type": "function",
+                "function": {
+                    "name": call["tool_name"],
+                    "arguments": json.dumps(call["arguments"], ensure_ascii=False)
+                }
+            })
+        else:  # anthropic
+            result.append({
+                "type": "tool_use",
+                "id": f"toolu_{uuid.uuid4().hex[:8]}",
                 "name": call["tool_name"],
-                "arguments": json.dumps(call["arguments"], ensure_ascii=False)
-            }
-        })
+                "input": call["arguments"]
+            })
+    return result
 
-    return openai_calls
+
+def mcp_to_openai_tool_calls(response_text: str) -> list:
+    """Convert MCP XML tool calls to OpenAI format."""
+    return _mcp_to_tool_calls(response_text, "openai")
 
 
 def mcp_to_anthropic_tool_use_blocks(response_text: str) -> list:
-    """
-    Convert MCP XML tool calls to Anthropic content blocks.
-
-    Anthropic format:
-        content = [{
-            "type": "tool_use",
-            "id": "toolu_xxx",
-            "name": "...",
-            "input": {...}
-        }]
-
-    Args:
-        response_text: Raw text containing MCP XML
-
-    Returns:
-        List of Anthropic tool_use content blocks
-    """
-    mcp_calls = extract_tool_calls_from_content(response_text)
-    blocks = []
-
-    for call in mcp_calls:
-        blocks.append({
-            "type": "tool_use",
-            "id": f"toolu_{uuid.uuid4().hex[:8]}",
-            "name": call["tool_name"],
-            "input": call["arguments"]
-        })
-
-    return blocks
+    """Convert MCP XML tool calls to Anthropic content blocks."""
+    return _mcp_to_tool_calls(response_text, "anthropic")
 
 
 def build_anthropic_content_blocks(response_text: str) -> list:
@@ -706,6 +648,16 @@ def get_tool_definitions_by_names(tools: list, names: list, server_name: str = "
     result_parts = []
     names_set = set(names)
     found_names = set()
+
+    # Special handling for search_tools (virtual tool, not in original tools list)
+    if "search_tools" in names_set:
+        found_names.add("search_tools")
+        search_func = SEARCH_TOOLS_DEFINITION["function"]
+        result_parts.append(
+            f"## Tool: search_tools\n"
+            f"Description: {search_func['description']}\n"
+            f"Input schema: {json.dumps(search_func['parameters'], ensure_ascii=False)}\n"
+        )
 
     for tool in tools:
         if tool.get("type") == "function":

@@ -15,19 +15,29 @@ A Flask-based API proxy that enables standard OpenAI/Anthropic API clients to wo
 ## Installation
 
 ```bash
+# Using pip
 python -m venv .venv
 source .venv/bin/activate
 pip install -e .
+
+# Using uv (recommended)
+uv venv
+uv pip install -e .
 ```
 
 ## Usage
 
 ```bash
-# Start router
+# Configure via .env file (recommended)
+cp .env.example .env
+# Edit .env with your settings
+llm-router
+
+# Or via environment variables
 export LLM_BASE_URL="http://your-llm-backend:8000"
 llm-router
 
-# Or with command line options
+# With command line options
 llm-router --port 8080
 
 # Enable debug logging to llm_router.log
@@ -191,10 +201,11 @@ Return Anthropic format response:
 
 ```
 llm_router/
-├── __init__.py        # CLI entry, --debug/--port options
+├── __init__.py        # Package exports
+├── cli.py             # CLI entry point, loads .env
 ├── server.py          # Flask endpoints, lazy loading logic
 ├── mcp_converter.py   # MCP/JSON parsing, format conversion
-├── llm_client.py      # HTTP client for backend
+├── llm_client.py      # OpenAI client for backend requests
 └── model_config.py    # Content validation (text/multimodal)
 tests/
 └── test_mcp_converter.py  # Unit tests
@@ -218,6 +229,9 @@ This creates `llm_router.log` with:
 ```bash
 pytest
 pytest -v
+
+# Or with uv
+uv run pytest -v
 ```
 
 ## Example

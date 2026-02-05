@@ -4,10 +4,8 @@ LLM backend client module.
 This module provides functions for making HTTP requests to the LLM backend.
 """
 
-import json
 import os
-from urllib.request import Request, urlopen
-from urllib.error import URLError, HTTPError
+from openai import OpenAI
 
 
 def get_request_timeout() -> float | None:
@@ -27,42 +25,38 @@ def get_request_timeout() -> float | None:
 
 def make_llm_request(payload: dict, llm_base_url: str, api_key: str = None) -> dict:
     """
-    Make an HTTP request to the LLM backend.
+    Make a request to the LLM backend using OpenAI client.
 
     Args:
-        payload: The request payload to send to the LLM backend
+        payload: The request payload (OpenAI chat completions format)
         llm_base_url: The base URL of the LLM server
         api_key: Optional API key for authentication
 
     Returns:
-        The JSON response from the LLM backend
+        The response dict from the LLM backend
 
     Raises:
-        Exception: If the HTTP request fails
+        Exception: If the request fails
     """
-    url = f"{llm_base_url}/v1/chat/completions"
-    data = json.dumps(payload).encode('utf-8')
-    headers = {
-        'Content-Type': 'application/json',
-    }
-
-    # Add API key if provided
-    if api_key:
-        headers['Authorization'] = f'Bearer {api_key}'
-
-    req = Request(url, data=data, headers=headers)
-
-    timeout = get_request_timeout()
+    client = OpenAI(
+        base_url=f"{llm_base_url}/v1",
+        api_key=api_key or "not-needed",
+        timeout=get_request_timeout(),
+    )
 
     try:
-        if timeout is not None:
-            with urlopen(req, timeout=timeout) as response:
-                return json.loads(response.read().decode('utf-8'))
-        else:
-            with urlopen(req) as response:
-                return json.loads(response.read().decode('utf-8'))
-    except HTTPError as e:
-        error_data = e.read().decode('utf-8')
-        raise Exception(f"LLM HTTP error {e.code}: {error_data}")
-    except URLError as e:
-        raise Exception(f"LLM connection error: {e.reason}")
+        # Copy payload to avoid modifying original
+        params = payload.copy()
+        model = params.pop("model", "default")
+        messages = params.pop("messages", [])
+
+        response = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            **params  # Pass all other parameters directly
+        )
+
+        # Convert to dict format
+        return response.model_dump()
+    except Exception as e:
+        raise Exception(f"LLM request error: {e}")

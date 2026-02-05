@@ -18,7 +18,6 @@ import logging
 from datetime import datetime
 from flask import Flask, request, jsonify
 from urllib.request import Request, urlopen
-from urllib.error import URLError, HTTPError
 
 from .mcp_converter import (
     mcp_to_openai_tool_calls,
@@ -45,7 +44,9 @@ LLM_BASE_URL = os.environ.get("LLM_BASE_URL", "http://localhost:8000")
 LLM_API_KEY = os.environ.get("LLM_API_KEY", None)
 FLASK_PORT = int(os.environ.get("FLASK_PORT", "5001"))
 # Max tokens cap - prevents requests exceeding model context length
-MAX_TOKENS_CAP = int(os.environ.get("MAX_TOKENS_CAP", "16384"))
+# Set to empty string or 0 to disable cap
+_max_tokens_cap_str = os.environ.get("MAX_TOKENS_CAP", "16384")
+MAX_TOKENS_CAP = int(_max_tokens_cap_str) if _max_tokens_cap_str else None
 # Max tools definition size in characters (roughly 4 chars per token)
 # If tools exceed this, use lazy loading instead of full MCP prompt
 MAX_TOOLS_CHARS = int(os.environ.get("MAX_TOOLS_CHARS", "40000"))
@@ -188,32 +189,44 @@ def truncate_messages(messages: list, max_chars: int = None) -> list:
 app = Flask(__name__)
 
 
-class AppConfig:
-    """Application configuration container."""
-
-    def __init__(self):
-        self.llm_base_url = os.environ.get("LLM_BASE_URL", "http://localhost:8000")
-        self.llm_api_key = os.environ.get("LLM_API_KEY", None)
-        self.flask_port = int(os.environ.get("FLASK_PORT", "5001"))
-        self.max_tokens_cap = int(os.environ.get("MAX_TOKENS_CAP", "16384"))
-
-    def update(self, llm_base_url=None, llm_api_key=None):
-        if llm_base_url is not None:
-            self.llm_base_url = llm_base_url
-        if llm_api_key is not None:
-            self.llm_api_key = llm_api_key
-
-
 def create_app(llm_base_url=None, llm_api_key=None):
     """Create and configure the Flask application."""
-    app.config_obj = AppConfig()
-    app.config_obj.update(llm_base_url, llm_api_key)
-
     global LLM_BASE_URL, LLM_API_KEY
-    LLM_BASE_URL = app.config_obj.llm_base_url
-    LLM_API_KEY = app.config_obj.llm_api_key
-
+    if llm_base_url is not None:
+        LLM_BASE_URL = llm_base_url
+    if llm_api_key is not None:
+        LLM_API_KEY = llm_api_key
     return app
+
+
+def inject_system_prompt(messages: list, prompt: str) -> list:
+    """Inject a system prompt at the beginning of messages."""
+    if not prompt:
+        return messages
+    if messages and messages[0].get("role") == "system":
+        messages[0]["content"] = prompt + "\n\n" + messages[0]["content"]
+    else:
+        messages.insert(0, {"role": "system", "content": prompt})
+    return messages
+
+
+def log_request(endpoint: str, data: dict) -> tuple[list, int]:
+    """Log request and return tools info."""
+    tools = data.get("tools", [])
+    messages_list = data.get("messages", [])
+    total_chars = sum(len(str(m.get("content", ""))) for m in messages_list)
+    tools_chars = len(json.dumps(tools)) if tools else 0
+
+    print(f"[{endpoint}] messages={len(messages_list)}, tools={len(tools)}, content_chars={total_chars}, tools_chars={tools_chars}")
+    log_debug(f"REQUEST /v1/{endpoint.lower()}", {
+        "model": data.get("model"),
+        "max_tokens": data.get("max_tokens"),
+        "temperature": data.get("temperature"),
+        "messages": messages_list,
+        "tools_count": len(tools),
+        "tools": tools,
+    })
+    return tools, tools_chars
 
 
 def create_error_response(message: str, is_anthropic: bool = False, status_code: int = 500):
@@ -295,58 +308,30 @@ def chat_completions():
     """OpenAI Chat Completions API endpoint."""
     try:
         data = request.get_json()
-
-        # Debug: log request
-        tools = data.get("tools", [])
-        tools_count = len(tools)
-        messages_list = data.get("messages", [])
-        messages_count = len(messages_list)
-        total_chars = sum(len(str(m.get("content", ""))) for m in messages_list)
-        tools_chars = len(json.dumps(tools)) if tools else 0
-
-        # Console output (brief)
-        print(f"[OpenAI] messages={messages_count}, tools={tools_count}, content_chars={total_chars}, tools_chars={tools_chars}")
-
-        # File logging (detailed)
-        log_debug("REQUEST /v1/chat/completions", {
-            "model": data.get("model"),
-            "messages": messages_list,
-            "tools_count": tools_count,
-            "tools": tools,
-        })
+        tools, tools_chars = log_request("OpenAI", data)
 
         model = data.get("model", "default")
         messages = data.get("messages", [])
-        temperature = data.get("temperature", 0.7)
-        max_tokens = data.get("max_tokens", None)
 
-        # Cap max_tokens to prevent exceeding model context
-        if max_tokens is None or max_tokens > MAX_TOKENS_CAP:
-            max_tokens = MAX_TOKENS_CAP
+        # Cap max_tokens if limit is configured
+        max_tokens = data.get("max_tokens")
+        if MAX_TOKENS_CAP is not None and max_tokens is not None and max_tokens > MAX_TOKENS_CAP:
+            data["max_tokens"] = MAX_TOKENS_CAP
 
         # Validate content
         messages, rejection = process_messages_with_content_validation(messages, is_anthropic=False)
         if rejection:
             return jsonify(rejection)
 
-        # Build request payload
-        payload = {
-            "model": model,
-            "messages": messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
+        # Build request payload - start with original data, replace converted fields
+        payload = {k: v for k, v in data.items() if k not in ("messages", "tools")}
+        payload["model"] = model
+        payload["messages"] = messages
 
         # Inject MCP system prompt if tools provided and not too large
-        # Skip if tools would overflow model context
         if tools and tools_chars < MAX_TOOLS_CHARS:
             mcp_prompt = generate_mcp_system_prompt(tools)
-            if mcp_prompt:
-                if messages and messages[0].get("role") == "system":
-                    messages[0]["content"] = mcp_prompt + "\n\n" + messages[0]["content"]
-                else:
-                    messages.insert(0, {"role": "system", "content": mcp_prompt})
-            payload["messages"] = messages
+            payload["messages"] = inject_system_prompt(messages, mcp_prompt)
         elif tools and tools_chars >= MAX_TOOLS_CHARS:
             print(f"[OpenAI] Skipping MCP prompt: tools_chars={tools_chars} >= MAX_TOOLS_CHARS={MAX_TOOLS_CHARS}")
 
@@ -395,35 +380,16 @@ def messages():
     """Anthropic Messages API endpoint with lazy tool loading."""
     try:
         data = request.get_json()
-
-        # Debug: log request
-        tools = data.get("tools", [])
-        tools_count = len(tools)
-        messages_list = data.get("messages", [])
-        messages_count = len(messages_list)
-        total_chars = sum(len(str(m.get("content", ""))) for m in messages_list)
-        tools_chars = len(json.dumps(tools)) if tools else 0
-
-        # Console output (brief)
-        print(f"[Anthropic] messages={messages_count}, tools={tools_count}, content_chars={total_chars}, tools_chars={tools_chars}")
-
-        # File logging (detailed)
-        log_debug("REQUEST /v1/messages", {
-            "model": data.get("model"),
-            "messages": messages_list,
-            "tools_count": tools_count,
-            "tools": tools,
-        })
+        tools, tools_chars = log_request("Anthropic", data)
 
         model = data.get("model", "default")
         messages = data.get("messages", [])
         tools = data.get("tools", [])
-        temperature = data.get("temperature", 0.7)
-        max_tokens = data.get("max_tokens", 4096)
 
-        # Cap max_tokens to prevent exceeding model context
-        if max_tokens > MAX_TOKENS_CAP:
-            max_tokens = MAX_TOKENS_CAP
+        # Cap max_tokens if limit is configured
+        max_tokens = data.get("max_tokens")
+        if MAX_TOKENS_CAP is not None and max_tokens is not None and max_tokens > MAX_TOKENS_CAP:
+            data["max_tokens"] = MAX_TOKENS_CAP
 
         # Validate content
         messages, rejection = process_messages_with_content_validation(messages, is_anthropic=True)
@@ -457,13 +423,10 @@ def messages():
                         }
                     })
 
-        # Build request payload
-        payload = {
-            "model": model,
-            "messages": openai_messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-        }
+        # Build request payload - start with original data, replace converted fields
+        payload = {k: v for k, v in data.items() if k not in ("messages", "tools", "system")}
+        payload["model"] = model
+        payload["messages"] = openai_messages
 
         # Decide: full MCP prompt or lazy loading
         use_lazy_loading = openai_tools and tools_chars >= MAX_TOOLS_CHARS
@@ -471,12 +434,7 @@ def messages():
         if openai_tools and not use_lazy_loading:
             # Normal mode: inject full MCP prompt
             mcp_prompt = generate_mcp_system_prompt(openai_tools)
-            if mcp_prompt:
-                if openai_messages and openai_messages[0].get("role") == "system":
-                    openai_messages[0]["content"] = mcp_prompt + "\n\n" + openai_messages[0]["content"]
-                else:
-                    openai_messages.insert(0, {"role": "system", "content": mcp_prompt})
-            payload["messages"] = openai_messages
+            payload["messages"] = inject_system_prompt(openai_messages, mcp_prompt)
 
             # Forward to backend
             llm_response = make_llm_request(payload, LLM_BASE_URL, LLM_API_KEY)
@@ -488,11 +446,7 @@ def messages():
 
             # Inject lazy MCP prompt (tool names only + search_tools)
             lazy_prompt = generate_lazy_mcp_prompt(openai_tools)
-            if openai_messages and openai_messages[0].get("role") == "system":
-                openai_messages[0]["content"] = lazy_prompt + "\n\n" + openai_messages[0]["content"]
-            else:
-                openai_messages.insert(0, {"role": "system", "content": lazy_prompt})
-            payload["messages"] = openai_messages
+            payload["messages"] = inject_system_prompt(openai_messages, lazy_prompt)
 
             # Internal loop
             response_text = ""
@@ -502,13 +456,19 @@ def messages():
                 llm_response = make_llm_request(payload, LLM_BASE_URL, LLM_API_KEY)
                 response_text = llm_response.get("choices", [{}])[0].get("message", {}).get("content", "")
 
-                # Check for search_tools call
+                # Check for tool calls
                 tool_calls = extract_tool_calls_from_content(response_text)
+                real_tool_calls = [c for c in tool_calls if c["tool_name"] != "search_tools"]
                 search_calls = [c for c in tool_calls if c["tool_name"] == "search_tools"]
 
+                # If there are real tool calls (not search_tools), exit loop and return to client
+                if real_tool_calls:
+                    print(f"[Anthropic] Found real tool call(s): {[c['tool_name'] for c in real_tool_calls]}, exiting lazy loading at round {round_num + 1}")
+                    break
+
                 if not search_calls:
-                    # No search_tools call - exit loop
-                    print(f"[Anthropic] Lazy loading complete at round {round_num + 1}")
+                    # No tool calls at all - exit loop
+                    print(f"[Anthropic] Lazy loading complete at round {round_num + 1} (no tool calls)")
                     break
 
                 # Process search_tools call
@@ -526,7 +486,11 @@ def messages():
                 })
                 payload["messages"].append({
                     "role": "user",
-                    "content": f"[Tool definitions for: {', '.join(requested_names)}]\n\n{tool_defs}\n\nNow you can use these tools. Proceed with your task."
+                    "content": f"""Here are the tool definitions you requested:
+
+{tool_defs}
+
+You now have the full definitions. Call the tool directly using <use_mcp_tool> format. Do NOT call search_tools again for these tools."""
                 })
 
                 log_debug(f"SEARCH_TOOLS round {round_num + 1}", {

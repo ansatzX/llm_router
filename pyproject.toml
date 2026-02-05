@@ -21,11 +21,14 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Internet :: WWW/HTTP :: WSGI :: Application",
 ]
 dependencies = [
     "flask>=3.0.0",
     "json-repair>=0.30.0",
+    "python-dotenv>=1.0.0",
+    "openai>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -35,12 +38,11 @@ dev = [
     "ruff>=0.1.0",
 ]
 examples = [
-    "openai>=1.0.0",
     "anthropic>=0.18.0",
 ]
 
 [project.scripts]
-llm-router = "llm_router:main"
+llm-router = "llm_router.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/yourusername/llm-router"
