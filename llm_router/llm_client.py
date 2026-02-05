@@ -77,9 +77,6 @@ def make_llm_request(payload: dict, llm_base_url: str, api_key: str = None) -> d
         openai_params = {k: v for k, v in params.items() if k in OPENAI_PARAMS}
         extra_params = {k: v for k, v in params.items() if k not in OPENAI_PARAMS}
 
-        # Force stream=False - router doesn't support streaming (needs full response for tool parsing)
-        openai_params["stream"] = False
-
         # Pass extra params via extra_body for vLLM/SGLang backends
         if extra_params:
             openai_params["extra_body"] = extra_params

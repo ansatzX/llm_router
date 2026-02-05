@@ -304,6 +304,10 @@ def chat_completions():
         payload["model"] = model
         payload["messages"] = messages
 
+        # Force stream=False when tools are provided (need full response for MCP parsing)
+        if tools:
+            payload["stream"] = False
+
         # Inject MCP system prompt if tools provided and not too large
         if tools and tools_chars < MAX_TOOLS_CHARS:
             mcp_prompt = generate_mcp_system_prompt(tools)
@@ -403,6 +407,10 @@ def messages():
         payload = {k: v for k, v in data.items() if k not in ("messages", "tools", "system")}
         payload["model"] = model
         payload["messages"] = openai_messages
+
+        # Force stream=False when tools are provided (need full response for MCP parsing)
+        if openai_tools:
+            payload["stream"] = False
 
         # Decide: full MCP prompt or lazy loading
         use_lazy_loading = openai_tools and tools_chars >= MAX_TOOLS_CHARS
