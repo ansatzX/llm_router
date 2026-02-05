@@ -15,7 +15,6 @@ import json
 import os
 import uuid
 import logging
-from datetime import datetime
 from flask import Flask, request, jsonify
 from urllib.request import Request, urlopen
 
@@ -36,6 +35,7 @@ from .model_config import (
     get_multimodal_document_prompt,
     validate_content_blocks,
 )
+from .debug_log import log_debug, set_debug_mode
 
 logger = logging.getLogger(__name__)
 
@@ -56,29 +56,6 @@ MAX_TOOL_SEARCH_ROUNDS = int(os.environ.get("MAX_TOOL_SEARCH_ROUNDS", "20"))
 # Default 800k chars ≈ 200k tokens (Claude's context window)
 # For smaller models, set MAX_CONTEXT_CHARS in .env (e.g., 52000 for 21k token model)
 MAX_CONTEXT_CHARS = int(os.environ.get("MAX_CONTEXT_CHARS", "800000"))
-
-# Debug mode for detailed logging
-DEBUG_MODE = False
-DEBUG_LOG_FILE = "llm_router.log"
-
-
-def set_debug_mode(enabled: bool):
-    """Enable or disable debug logging to file."""
-    global DEBUG_MODE
-    DEBUG_MODE = enabled
-
-
-def log_debug(message: str, data: dict = None):
-    """Log debug message to file if debug mode is enabled."""
-    if not DEBUG_MODE:
-        return
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    with open(DEBUG_LOG_FILE, "a", encoding="utf-8") as f:
-        f.write(f"\n{'='*80}\n")
-        f.write(f"[{timestamp}] {message}\n")
-        if data:
-            f.write(json.dumps(data, ensure_ascii=False, indent=2))
-            f.write("\n")
 
 
 def truncate_messages(messages: list, max_chars: int = None) -> list:
@@ -218,14 +195,13 @@ def log_request(endpoint: str, data: dict) -> tuple[list, int]:
     tools_chars = len(json.dumps(tools)) if tools else 0
 
     print(f"[{endpoint}] messages={len(messages_list)}, tools={len(tools)}, content_chars={total_chars}, tools_chars={tools_chars}")
-    log_debug(f"REQUEST /v1/{endpoint.lower()}", {
-        "model": data.get("model"),
-        "max_tokens": data.get("max_tokens"),
-        "temperature": data.get("temperature"),
-        "messages": messages_list,
-        "tools_count": len(tools),
-        "tools": tools,
-    })
+
+    # Log full request data (copy to avoid modifying original)
+    log_data = data.copy()
+    # Replace tools with count to avoid huge logs
+    if tools:
+        log_data["tools"] = f"[{len(tools)} tools, {tools_chars} chars]"
+    log_debug(f"CLIENT_REQUEST /v1/{endpoint.lower()}", log_data)
     return tools, tools_chars
 
 
@@ -366,7 +342,7 @@ def chat_completions():
             response["choices"][0]["message"]["tool_calls"] = tool_calls
 
         # Log response
-        log_debug("RESPONSE /v1/chat/completions", response)
+        log_debug("CLIENT_RESPONSE /v1/chat/completions", response)
 
         return jsonify(response)
 
@@ -542,7 +518,7 @@ You now have the full definitions. Call the tool directly using <use_mcp_tool> f
             }
 
         # Log response
-        log_debug("RESPONSE /v1/messages", response)
+        log_debug("CLIENT_RESPONSE /v1/messages", response)
 
         return jsonify(response)
 

@@ -20,4 +20,5 @@ __author__ = "ansatz Vibe"
 __license__ = "MIT"
 __all__ = ["create_app", "app", "set_debug_mode"]
 
-from .server import create_app, app, set_debug_mode
+from .server import create_app, app
+from .debug_log import set_debug_mode

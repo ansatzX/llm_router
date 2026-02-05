@@ -22,7 +22,8 @@ def main():
     args = parser.parse_args()
 
     # NOW import server (with .env already loaded)
-    from llm_router.server import app, set_debug_mode
+    from llm_router.server import app
+    from llm_router.debug_log import set_debug_mode
 
     if args.debug:
         set_debug_mode(True)
