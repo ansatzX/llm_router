@@ -75,6 +75,7 @@ def test_validate_none_values_in_arguments():
     assert is_valid is True
     assert warning is not None
     assert "None" in warning
+    assert "param2" in warning or "['param2']" in warning
 
 
 def test_sanitize_arguments_removes_none():
