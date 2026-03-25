@@ -1,9 +1,8 @@
 """Tool call validation functions."""
-from typing import Tuple, Optional
 from .base import ToolCall
 
 
-def validate_tool_call(tool_call: ToolCall) -> Tuple[bool, Optional[str]]:
+def validate_tool_call(tool_call: ToolCall) -> tuple[bool, str | None]:
     """
     Validate tool call data completeness.
 
