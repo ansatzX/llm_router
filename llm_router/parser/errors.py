@@ -46,5 +46,10 @@ class JSONParseError(ParseError):
 class ValidationError(ParseError):
     """Validation error."""
 
-    def __init__(self, message: str, context: str = "", error_type: ParseErrorType = ParseErrorType.MISSING_TOOL_NAME):
+    def __init__(
+        self,
+        message: str,
+        context: str = "",
+        error_type: ParseErrorType = ParseErrorType.MISSING_TOOL_NAME
+    ):
         super().__init__(error_type, message, context)
