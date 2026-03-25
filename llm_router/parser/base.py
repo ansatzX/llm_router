@@ -5,13 +5,14 @@ import json
 import uuid
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from typing import Any
 
 
 @dataclass
 class ToolCall:
     """Represents a parsed tool call."""
     tool_name: str
-    arguments: dict
+    arguments: dict[str, Any]
     server_name: str = "tools"
 
     def to_openai_format(self) -> dict:
