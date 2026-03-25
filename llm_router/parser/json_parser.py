@@ -54,31 +54,49 @@ class JSONParser(ToolCallParser):
                 return ParseResult.error(["No JSON tool calls found"], warnings)
 
     def _extract_json_objects(self, content: str) -> list:
-        """Extract all potential JSON objects from content."""
+        """Extract all potential JSON objects from content.
+
+        Handles braces inside string values correctly by tracking string
+        boundaries and escape sequences.
+        """
         objects = []
         i = 0
 
         while i < len(content):
             if content[i] == '{':
-                # Find matching closing brace
-                depth = 1
+                # Find matching closing brace, accounting for strings
+                depth = 0
+                in_string = False
+                escape_next = False
                 start = i
-                i += 1
 
-                while i < len(content) and depth > 0:
-                    if content[i] == '{':
-                        depth += 1
-                    elif content[i] == '}':
-                        depth -= 1
+                while i < len(content):
+                    char = content[i]
+
+                    if escape_next:
+                        # Current character is escaped, skip it
+                        escape_next = False
+                    elif char == '\\':
+                        # Next character will be escaped
+                        escape_next = True
+                    elif char == '"' and not escape_next:
+                        # Toggle string state (unescaped quote)
+                        in_string = not in_string
+                    elif not in_string:
+                        # Only count braces outside strings
+                        if char == '{':
+                            depth += 1
+                        elif char == '}':
+                            depth -= 1
+                            if depth == 0:
+                                # Found complete JSON object
+                                json_candidate = content[start:i+1]
+                                # Filter: must contain tool-related fields (with or without quotes)
+                                if any(field in json_candidate for field in ['"name"', '"tool"', 'name:', 'tool:']):
+                                    objects.append(json_candidate)
+                                break
                     i += 1
-
-                if depth == 0:
-                    json_candidate = content[start:i]
-                    # Filter: must contain tool-related fields (with or without quotes)
-                    if any(field in json_candidate for field in ['"name"', '"tool"', 'name:', 'tool:']):
-                        objects.append(json_candidate)
-            else:
-                i += 1
+            i += 1
 
         return objects
 
