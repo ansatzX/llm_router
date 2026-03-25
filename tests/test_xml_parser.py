@@ -135,3 +135,149 @@ def test_parse_no_xml_found():
 
     assert result.success is False
     assert len(result.tool_calls) == 0
+
+
+def test_parse_tool_call_json_missing_name_field():
+    """Test TOOL_CALL JSON with missing 'name' field."""
+    parser = XMLParser()
+    content = """[TOOL_CALL]
+{"arguments": {"path": "/test.txt"}}
+[/TOOL_CALL]"""
+    result = parser.parse(content)
+
+    assert result.success is False
+    assert len(result.tool_calls) == 0
+    assert len(result.errors) > 0
+
+
+def test_parse_tool_call_json_non_dict_arguments():
+    """Test TOOL_CALL with non-dict arguments."""
+    parser = XMLParser()
+    content = """[TOOL_CALL]
+{"name": "read_file", "arguments": "not a dict"}
+[/TOOL_CALL]"""
+    result = parser.parse(content)
+
+    assert result.success is True
+    assert result.tool_calls[0].arguments == {}  # Non-dict replaced with empty dict
+
+
+def test_parse_tool_call_completely_unparseable_json():
+    """Test TOOL_CALL with completely unparseable JSON."""
+    parser = XMLParser()
+    content = """[TOOL_CALL]
+this is not json at all!!! $$$
+[/TOOL_CALL]"""
+    result = parser.parse(content)
+
+    assert result.success is False
+    assert len(result.tool_calls) == 0
+    assert len(result.errors) > 0
+
+
+def test_parse_xml_unparseable_arguments_after_repair():
+    """Test XML with unparseable arguments even after json_repair."""
+    parser = XMLParser()
+    content = """
+<use_mcp_tool>
+<tool_name>test_tool</tool_name>
+<arguments>!!! completely broken json $$$</arguments>
+</use_mcp_tool>
+"""
+    result = parser.parse(content)
+
+    assert result.success is False
+    assert len(result.tool_calls) == 0
+    assert len(result.errors) > 0
+
+
+def test_size_limit_enforced():
+    """Test that 10MB size limit is enforced."""
+    parser = XMLParser()
+    # Create content larger than 10MB
+    large_content = "x" * (11 * 1024 * 1024)  # 11MB
+    result = parser.parse(large_content)
+
+    # Should not crash, just truncate
+    assert result.success is False
+
+
+def test_empty_tool_name_string():
+    """Test XML with empty tool_name string."""
+    parser = XMLParser()
+    content = """
+<use_mcp_tool>
+<tool_name></tool_name>
+<arguments>{"param": "value"}</arguments>
+</use_mcp_tool>
+"""
+    result = parser.parse(content)
+
+    assert result.success is False
+    assert len(result.tool_calls) == 0
+
+
+def test_tool_name_whitespace_only():
+    """Test XML with tool_name containing only whitespace."""
+    parser = XMLParser()
+    content = """
+<use_mcp_tool>
+<tool_name>   </tool_name>
+<arguments>{"param": "value"}</arguments>
+</use_mcp_tool>
+"""
+    result = parser.parse(content)
+
+    assert result.success is False
+    assert len(result.tool_calls) == 0
+
+
+def test_mixed_valid_and_invalid_tool_calls():
+    """Test parsing mixed valid and invalid tool calls in same content."""
+    parser = XMLParser()
+    content = """
+<use_mcp_tool>
+<tool_name>valid_tool</tool_name>
+<arguments>{"param": "value"}</arguments>
+</use_mcp_tool>
+<use_mcp_tool>
+<tool_name></tool_name>
+<arguments>{"param": "value2"}</arguments>
+</use_mcp_tool>
+<use_mcp_tool>
+<tool_name>another_valid</tool_name>
+<arguments>{"x": "y"}</arguments>
+</use_mcp_tool>
+"""
+    result = parser.parse(content)
+
+    assert result.success is True
+    assert len(result.tool_calls) == 2  # Only valid ones
+    assert result.tool_calls[0].tool_name == "valid_tool"
+    assert result.tool_calls[1].tool_name == "another_valid"
+
+
+def test_empty_arguments_vs_missing_arguments_tag():
+    """Test difference between empty arguments dict and missing arguments tag."""
+    parser = XMLParser()
+
+    # Empty arguments dict
+    content1 = """
+<use_mcp_tool>
+<tool_name>test</tool_name>
+<arguments>{}</arguments>
+</use_mcp_tool>
+"""
+    result1 = parser.parse(content1)
+    assert result1.success is True
+    assert result1.tool_calls[0].arguments == {}
+
+    # Missing arguments tag
+    content2 = """
+<use_mcp_tool>
+<tool_name>test</tool_name>
+</use_mcp_tool>
+"""
+    result2 = parser.parse(content2)
+    assert result2.success is True
+    assert result2.tool_calls[0].arguments == {}

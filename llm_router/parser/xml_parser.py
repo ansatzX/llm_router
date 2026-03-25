@@ -2,6 +2,8 @@
 import json
 import re
 
+from json_repair import repair_json
+
 from .base import ParseResult, ToolCall, ToolCallParser
 from .errors import ValidationError, XMLParseError
 from .validator import validate_tool_call
@@ -9,6 +11,9 @@ from .validator import validate_tool_call
 
 class XMLParser(ToolCallParser):
     """Parser for XML format tool calls."""
+
+    # Size limit constant
+    MAX_CONTENT_SIZE = 10 * 1024 * 1024  # 10MB
 
     # XML patterns for different formats
     PATTERNS = {
@@ -28,9 +33,8 @@ class XMLParser(ToolCallParser):
     def parse(self, content: str) -> ParseResult:
         """Parse XML format tool calls."""
         # Size limit
-        max_size = 10 * 1024 * 1024
-        if len(content) > max_size:
-            content = content[:max_size]
+        if len(content) > self.MAX_CONTENT_SIZE:
+            content = content[:self.MAX_CONTENT_SIZE]
 
         # Try each format in priority order
         for format_type, pattern in self.PATTERNS.items():
@@ -113,8 +117,6 @@ class XMLParser(ToolCallParser):
 
     def _parse_tool_call_json(self, content: str) -> ToolCall | None:
         """Parse TOOL_CALL format with JSON content."""
-        from json_repair import repair_json
-
         try:
             data = json.loads(content.strip())
         except json.JSONDecodeError:
@@ -146,7 +148,7 @@ class XMLParser(ToolCallParser):
             server_name="tools"
         )
 
-    def _extract_tag(self, content: str, tag_names: list) -> str | None:
+    def _extract_tag(self, content: str, tag_names: list[str]) -> str | None:
         """Extract content from first matching tag."""
         for tag in tag_names:
             match = re.search(rf'<{tag}>(.*?)</{tag}>', content, re.DOTALL)
@@ -156,8 +158,6 @@ class XMLParser(ToolCallParser):
 
     def _parse_arguments(self, args_text: str) -> dict:
         """Parse JSON arguments with repair fallback."""
-        from json_repair import repair_json
-
         try:
             return json.loads(args_text.strip())
         except json.JSONDecodeError:
