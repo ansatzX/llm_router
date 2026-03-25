@@ -1,7 +1,6 @@
 """Tests for tool call validator."""
-import pytest
 from llm_router.parser.base import ToolCall
-from llm_router.parser.validator import validate_tool_call, sanitize_arguments
+from llm_router.parser.validator import sanitize_arguments, validate_tool_call
 
 
 def test_validate_valid_tool_call():
