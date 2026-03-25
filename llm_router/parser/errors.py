@@ -23,8 +23,10 @@ class ParseError(Exception):
         super().__init__(f"[{error_type.value}] {message}")
 
     def __str__(self):
-        context_preview = self.context[:100] if self.context else ""
-        return f"{super().__str__()} (context: {context_preview}...)"
+        if self.context:
+            context_preview = self.context[:100]
+            return f"{super().__str__()} (context: {context_preview}...)"
+        return super().__str__()
 
 
 class XMLParseError(ParseError):
@@ -44,5 +46,5 @@ class JSONParseError(ParseError):
 class ValidationError(ParseError):
     """Validation error."""
 
-    def __init__(self, message: str, context: str = ""):
-        super().__init__(ParseErrorType.MISSING_TOOL_NAME, message, context)
+    def __init__(self, message: str, context: str = "", error_type: ParseErrorType = ParseErrorType.MISSING_TOOL_NAME):
+        super().__init__(error_type, message, context)
