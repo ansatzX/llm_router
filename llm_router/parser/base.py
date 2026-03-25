@@ -1,4 +1,6 @@
 """Parser base classes and data structures."""
+from __future__ import annotations
+
 import json
 import uuid
 from abc import ABC, abstractmethod
@@ -24,7 +26,7 @@ class ToolCall:
         }
 
 
-@dataclass
+@dataclass(frozen=True)
 class ParseResult:
     """Result of parsing tool calls."""
     success: bool
@@ -33,7 +35,7 @@ class ParseResult:
     warnings: list[str]
 
     @classmethod
-    def ok(cls, tool_calls: list[ToolCall], warnings: list[str] = None) -> 'ParseResult':
+    def ok(cls, tool_calls: list[ToolCall], warnings: list[str] | None = None) -> ParseResult:
         """Create successful parse result."""
         return cls(
             success=True,
@@ -43,7 +45,7 @@ class ParseResult:
         )
 
     @classmethod
-    def error(cls, errors: list[str], warnings: list[str] = None) -> 'ParseResult':
+    def error(cls, errors: list[str], warnings: list[str] | None = None) -> ParseResult:
         """Create failed parse result."""
         return cls(
             success=False,
