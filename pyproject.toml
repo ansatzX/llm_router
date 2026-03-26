@@ -5,14 +5,14 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "llm-router"
 version = "0.1.0"
-description = "LLM API Router with OpenAI and Anthropic protocol support"
+description = "LLM API Router with OpenAI protocol support and MCP XML tool parsing"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.10"
 authors = [
     {name = "ansatz Vibe"},
 ]
-keywords = ["flask", "llm", "openai", "anthropic", "mcp", "tool-calling", "router"]
+keywords = ["flask", "llm", "openai", "mcp", "tool-calling", "router"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -36,9 +36,6 @@ dev = [
     "pytest>=7.0.0",
     "pytest-cov>=4.0.0",
     "ruff>=0.1.0",
-]
-examples = [
-    "anthropic>=0.18.0",
 ]
 
 [project.scripts]

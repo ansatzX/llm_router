@@ -8,6 +8,10 @@ from dataclasses import dataclass
 from typing import Any
 
 
+# Maximum content size for parsing (10MB)
+MAX_CONTENT_SIZE = 10 * 1024 * 1024
+
+
 @dataclass
 class ToolCall:
     """Represents a parsed tool call."""

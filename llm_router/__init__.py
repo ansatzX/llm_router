@@ -1,8 +1,8 @@
 """
-LLM Router - A Flask-based router for LLM APIs with OpenAI and Anthropic protocol support.
+LLM Router - A Flask-based router for LLM APIs with OpenAI protocol support.
 
 This package provides a Flask application that acts as a proxy between LLM backends
-and clients expecting standard OpenAI or Anthropic protocol formats.
+and clients expecting standard OpenAI protocol formats with MCP XML tool parsing.
 
 Example:
     >>> from llm_router import create_app

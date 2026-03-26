@@ -1,7 +1,7 @@
 """JSON format parser for tool calls."""
 import json
 
-from .base import ParseResult, ToolCall, ToolCallParser
+from .base import MAX_CONTENT_SIZE, ParseResult, ToolCall, ToolCallParser
 from .errors import JSONParseError, ValidationError
 from .validator import validate_tool_call
 
@@ -16,9 +16,8 @@ class JSONParser(ToolCallParser):
     def parse(self, content: str) -> ParseResult:
         """Parse JSON format tool calls."""
         # Size limit
-        max_size = 10 * 1024 * 1024
-        if len(content) > max_size:
-            content = content[:max_size]
+        if len(content) > MAX_CONTENT_SIZE:
+            content = content[:MAX_CONTENT_SIZE]
 
         tool_calls = []
         errors = []

@@ -12,19 +12,30 @@ from openai import OpenAI
 from .debug_log import log_debug
 
 
+# Cached timeout value (parsed once at startup)
+_REQUEST_TIMEOUT: float | None = None
+_TIMEOUT_PARSED = False  # Flag to track if we've attempted parsing
+
+
 def get_request_timeout() -> float | None:
     """Get request timeout from environment variable.
 
     Returns:
-        Timeout in seconds, or None if not set (no timeout)
+        Timeout in seconds, or None if not set or invalid
     """
-    timeout_str = os.environ.get("LLM_REQUEST_TIMEOUT")
-    if not timeout_str:
-        return None
-    try:
-        return float(timeout_str)
-    except ValueError:
-        return None
+    global _REQUEST_TIMEOUT, _TIMEOUT_PARSED
+
+    if not _TIMEOUT_PARSED:
+        _TIMEOUT_PARSED = True
+        timeout_str = os.environ.get("LLM_REQUEST_TIMEOUT")
+        if timeout_str:
+            try:
+                _REQUEST_TIMEOUT = float(timeout_str)
+            except ValueError:
+                # Invalid value, keep as None
+                pass
+
+    return _REQUEST_TIMEOUT
 
 
 # Standard OpenAI chat completion parameters (whitelist)
@@ -34,6 +45,44 @@ OPENAI_PARAMS = {
     "logit_bias", "user", "response_format", "seed", "tools", "tool_choice",
     "parallel_tool_calls", "logprobs", "top_logprobs",
 }
+
+
+# Default API key when none provided
+_DEFAULT_API_KEY = "not-needed"
+
+# Cached OpenAI client instance (keyed by base_url and api_key)
+_CLIENT_CACHE: dict[tuple[str, str], OpenAI] = {}
+
+
+def _get_client(llm_base_url: str, api_key: str | None) -> OpenAI:
+    """Get or create cached OpenAI client instance.
+
+    Args:
+        llm_base_url: The base URL of the LLM server
+        api_key: Optional API key for authentication
+
+    Returns:
+        OpenAI client instance
+    """
+    # Normalize base_url for OpenAI client compatibility
+    base_url = llm_base_url.rstrip("/")
+    parsed = urlparse(base_url)
+
+    # Only append /v1 if path is empty
+    if not parsed.path or parsed.path == "/":
+        base_url = f"{base_url}/v1"
+
+    # Use tuple of (base_url, api_key) as cache key
+    cache_key = (base_url, api_key or _DEFAULT_API_KEY)
+
+    if cache_key not in _CLIENT_CACHE:
+        _CLIENT_CACHE[cache_key] = OpenAI(
+            base_url=base_url,
+            api_key=api_key or _DEFAULT_API_KEY,
+            timeout=get_request_timeout(),
+        )
+
+    return _CLIENT_CACHE[cache_key]
 
 
 def make_llm_request(payload: dict, llm_base_url: str, api_key: str = None) -> dict:
@@ -51,21 +100,7 @@ def make_llm_request(payload: dict, llm_base_url: str, api_key: str = None) -> d
     Raises:
         Exception: If the request fails
     """
-    # Normalize base_url for OpenAI client compatibility
-    # - If URL has no path (or just /), append /v1
-    # - If URL already has a path (e.g., /v1 or /api/v3), keep as is
-    base_url = llm_base_url.rstrip("/")
-    parsed = urlparse(base_url)
-
-    # Only append /v1 if path is empty
-    if not parsed.path or parsed.path == "/":
-        base_url = f"{base_url}/v1"
-
-    client = OpenAI(
-        base_url=base_url,
-        api_key=api_key or "not-needed",
-        timeout=get_request_timeout(),
-    )
+    client = _get_client(llm_base_url, api_key)
 
     try:
         # Copy payload to avoid modifying original
@@ -83,7 +118,7 @@ def make_llm_request(payload: dict, llm_base_url: str, api_key: str = None) -> d
 
         # Log request to LLM backend
         log_debug("LLM_REQUEST", {
-            "base_url": base_url,
+            "base_url": client.base_url,
             "model": model,
             "messages": messages,
             "openai_params": {k: v for k, v in openai_params.items() if k != "extra_body"},
@@ -105,3 +140,27 @@ def make_llm_request(payload: dict, llm_base_url: str, api_key: str = None) -> d
         return result
     except Exception as e:
         raise Exception(f"LLM request error: {e}")
+
+
+def list_models(llm_base_url: str, api_key: str = None) -> dict:
+    """
+    List available models from the LLM backend.
+
+    Args:
+        llm_base_url: The base URL of the LLM server
+        api_key: Optional API key for authentication
+
+    Returns:
+        Models list response from the LLM backend
+    """
+    client = _get_client(llm_base_url, api_key)
+
+    try:
+        response = client.models.list()
+        return response.model_dump()
+    except Exception as e:
+        # Return default model list on error (backend may not support /models endpoint)
+        return {
+            "object": "list",
+            "data": [{"id": "default", "object": "model", "created": 0}]
+        }

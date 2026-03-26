@@ -4,16 +4,13 @@ import re
 
 from json_repair import repair_json
 
-from .base import ParseResult, ToolCall, ToolCallParser
+from .base import MAX_CONTENT_SIZE, ParseResult, ToolCall, ToolCallParser
 from .errors import ValidationError, XMLParseError
 from .validator import validate_tool_call
 
 
 class XMLParser(ToolCallParser):
     """Parser for XML format tool calls."""
-
-    # Size limit constant
-    MAX_CONTENT_SIZE = 10 * 1024 * 1024  # 10MB
 
     # XML patterns for different formats
     PATTERNS = {
@@ -33,8 +30,8 @@ class XMLParser(ToolCallParser):
     def parse(self, content: str) -> ParseResult:
         """Parse XML format tool calls."""
         # Size limit
-        if len(content) > self.MAX_CONTENT_SIZE:
-            content = content[:self.MAX_CONTENT_SIZE]
+        if len(content) > MAX_CONTENT_SIZE:
+            content = content[:MAX_CONTENT_SIZE]
 
         # Try each format in priority order
         for format_type, pattern in self.PATTERNS.items():
