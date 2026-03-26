@@ -51,6 +51,8 @@ OPENAI_PARAMS = {
 _DEFAULT_API_KEY = "not-needed"
 
 # Cached OpenAI client instance (keyed by base_url and api_key)
+# Note: This cache is unbounded but acceptable for single-backend usage.
+# If multi-backend support is needed, consider adding LRU eviction with max size.
 _CLIENT_CACHE: dict[tuple[str, str], OpenAI] = {}
 
 

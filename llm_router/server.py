@@ -38,7 +38,11 @@ def create_app(llm_base_url=None, llm_api_key=None):
 
 
 def inject_system_prompt(messages: list, prompt: str) -> list:
-    """Inject a system prompt at the beginning of messages."""
+    """Inject a system prompt at the beginning of messages.
+
+    Note: This function modifies the input list in place and returns it.
+    This is intentional for efficiency and documented for clarity.
+    """
     if not prompt:
         return messages
     if messages and messages[0].get("role") == "system":
