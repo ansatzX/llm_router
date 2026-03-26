@@ -120,7 +120,7 @@ def make_llm_request(payload: dict, llm_base_url: str, api_key: str = None) -> d
 
         # Log request to LLM backend
         log_debug("LLM_REQUEST", {
-            "base_url": client.base_url,
+            "base_url": str(client.base_url),
             "model": model,
             "messages": messages,
             "openai_params": {k: v for k, v in openai_params.items() if k != "extra_body"},

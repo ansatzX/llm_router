@@ -1,10 +1,10 @@
 """XML format parser for tool calls."""
 import json
-import re
+import regex as re  # Use regex library for better Unicode support
 
 from json_repair import repair_json
 
-from .base import MAX_CONTENT_SIZE, ParseResult, ToolCall, ToolCallParser
+from .base import MAX_CONTENT_SIZE, ParseResult, ToolCall, ToolCallParser, ToolNameResolver, validate_tool_arguments
 from .errors import ValidationError, XMLParseError
 from .validator import validate_tool_call
 
@@ -23,11 +23,15 @@ class XMLParser(ToolCallParser):
     TOOL_NAME_TAGS = ['tool_name', 'function_name', 'name', 'function', 'action']
     ARGUMENT_TAGS = ['arguments', 'parameters', 'input', 'params', 'args']
 
+    def __init__(self, resolver: ToolNameResolver | None = None):
+        """Initialize parser with optional tool name resolver."""
+        self.resolver = resolver or ToolNameResolver()
+
     @property
     def format_name(self) -> str:
         return "xml"
 
-    def parse(self, content: str) -> ParseResult:
+    def parse(self, content: str, available_tools: list[dict] | None = None) -> ParseResult:
         """Parse XML format tool calls."""
         # Size limit
         if len(content) > MAX_CONTENT_SIZE:
@@ -50,22 +54,49 @@ class XMLParser(ToolCallParser):
                     tool_call = self._parse_single_xml(
                         match_content,
                         has_server_name=(format_type == 'mcp'),
-                        format_type=format_type
+                        format_type=format_type,
+                        available_tools=available_tools
                     )
 
                     if tool_call:
-                        # Validate
+                        # Validate basic structure
                         is_valid, warning = validate_tool_call(tool_call)
                         if warning:
                             warnings.append(warning)
 
                         if is_valid:
-                            tool_calls.append(tool_call)
+                            # Validate against tool schema
+                            tool_schema = None
+                            if available_tools:
+                                for tool in available_tools:
+                                    if tool.get("type") == "function":
+                                        func = tool.get("function", {})
+                                        if func.get("name") == tool_call.tool_name:
+                                            tool_schema = tool
+                                            break
+
+                            schema_errors = validate_tool_arguments(
+                                tool_call.tool_name,
+                                tool_call.arguments,
+                                tool_schema
+                            )
+
+                            if schema_errors:
+                                # Schema validation failed - treat as error
+                                errors.extend(schema_errors)
+                            else:
+                                # All validation passed
+                                tool_calls.append(tool_call)
 
                 except (XMLParseError, ValidationError) as e:
                     errors.append(str(e))
                 except Exception as e:
                     errors.append(f"Unexpected XML parse error: {e}")
+
+            # If we have schema validation errors, return them immediately
+            # This allows Rollback to trigger for malformed arguments
+            if errors and not tool_calls:
+                return ParseResult.error(errors, warnings)
 
             # Only return if we have VALID tool calls from this format
             if tool_calls:
@@ -81,12 +112,13 @@ class XMLParser(ToolCallParser):
         self,
         content: str,
         has_server_name: bool,
-        format_type: str = 'mcp'
+        format_type: str = 'mcp',
+        available_tools: list[dict] | None = None
     ) -> ToolCall | None:
         """Parse single XML block."""
         # TOOL_CALL format contains JSON, not XML
         if format_type == 'tool_call':
-            return self._parse_tool_call_json(content)
+            return self._parse_tool_call_json(content, available_tools)
 
         # Extract server_name (if present)
         if has_server_name:
@@ -102,17 +134,20 @@ class XMLParser(ToolCallParser):
                 context=content[:100]
             )
 
+        # Resolve tool name using server_name
+        resolved_name = self.resolver.resolve(server_name, tool_name, available_tools)
+
         # Extract arguments
         args_text = self._extract_tag(content, self.ARGUMENT_TAGS)
         arguments = self._parse_arguments(args_text) if args_text else {}
 
         return ToolCall(
-            tool_name=tool_name,
+            tool_name=resolved_name,
             arguments=arguments,
             server_name=server_name
         )
 
-    def _parse_tool_call_json(self, content: str) -> ToolCall | None:
+    def _parse_tool_call_json(self, content: str, available_tools: list[dict] | None = None) -> ToolCall | None:
         """Parse TOOL_CALL format with JSON content."""
         try:
             data = json.loads(content.strip())

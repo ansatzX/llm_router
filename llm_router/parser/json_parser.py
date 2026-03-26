@@ -1,7 +1,7 @@
 """JSON format parser for tool calls."""
 import json
 
-from .base import MAX_CONTENT_SIZE, ParseResult, ToolCall, ToolCallParser
+from .base import MAX_CONTENT_SIZE, ParseResult, ToolCall, ToolCallParser, ToolNameResolver, validate_tool_arguments
 from .errors import JSONParseError, ValidationError
 from .validator import validate_tool_call
 
@@ -9,11 +9,15 @@ from .validator import validate_tool_call
 class JSONParser(ToolCallParser):
     """Parser for JSON format tool calls."""
 
+    def __init__(self, resolver: ToolNameResolver | None = None):
+        """Initialize parser with optional tool name resolver."""
+        self.resolver = resolver or ToolNameResolver()
+
     @property
     def format_name(self) -> str:
         return "json"
 
-    def parse(self, content: str) -> ParseResult:
+    def parse(self, content: str, available_tools: list[dict] | None = None) -> ParseResult:
         """Parse JSON format tool calls."""
         # Size limit
         if len(content) > MAX_CONTENT_SIZE:
@@ -28,21 +32,47 @@ class JSONParser(ToolCallParser):
 
         for json_str in json_objects:
             try:
-                tool_call = self._parse_single_json(json_str)
+                tool_call = self._parse_single_json(json_str, available_tools)
 
                 if tool_call:
-                    # Validate
+                    # Validate basic structure
                     is_valid, warning = validate_tool_call(tool_call)
                     if warning:
                         warnings.append(warning)
 
                     if is_valid:
-                        tool_calls.append(tool_call)
+                        # Validate against tool schema
+                        tool_schema = None
+                        if available_tools:
+                            for tool in available_tools:
+                                if tool.get("type") == "function":
+                                    func = tool.get("function", {})
+                                    if func.get("name") == tool_call.tool_name:
+                                        tool_schema = tool
+                                        break
+
+                        schema_errors = validate_tool_arguments(
+                            tool_call.tool_name,
+                            tool_call.arguments,
+                            tool_schema
+                        )
+
+                        if schema_errors:
+                            # Schema validation failed - treat as error
+                            errors.extend(schema_errors)
+                        else:
+                            # All validation passed
+                            tool_calls.append(tool_call)
 
             except (JSONParseError, ValidationError) as e:
                 errors.append(str(e))
             except Exception as e:
                 errors.append(f"Unexpected JSON parse error: {e}")
+
+        # If we have schema validation errors, return them immediately
+        # This allows Rollback to trigger for malformed arguments
+        if errors and not tool_calls:
+            return ParseResult.error(errors, warnings)
 
         if tool_calls:
             return ParseResult.ok(tool_calls, warnings)
@@ -99,7 +129,7 @@ class JSONParser(ToolCallParser):
 
         return objects
 
-    def _parse_single_json(self, json_str: str) -> ToolCall | None:
+    def _parse_single_json(self, json_str: str, available_tools: list[dict] | None = None) -> ToolCall | None:
         """Parse single JSON object."""
         from json_repair import repair_json
 
@@ -136,6 +166,12 @@ class JSONParser(ToolCallParser):
                 context=json_str[:100]
             )
 
+        # Extract server_name if present
+        server_name = obj.get("server_name", "tools")
+
+        # Resolve tool name
+        resolved_name = self.resolver.resolve(server_name, tool_name, available_tools)
+
         # Extract arguments (try multiple field names)
         arguments = (
             obj.get("arguments") or
@@ -161,7 +197,7 @@ class JSONParser(ToolCallParser):
             arguments = {}
 
         return ToolCall(
-            tool_name=str(tool_name),
+            tool_name=str(resolved_name),
             arguments=arguments,
-            server_name="tools"
+            server_name=server_name
         )

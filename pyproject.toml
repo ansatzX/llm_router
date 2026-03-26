@@ -29,6 +29,7 @@ dependencies = [
     "json-repair>=0.30.0",
     "python-dotenv>=1.0.0",
     "openai>=1.0.0",
+    "regex>=2024.0.0",
 ]
 
 [project.optional-dependencies]
