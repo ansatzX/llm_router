@@ -4,13 +4,14 @@ This module provides Flask endpoints for the LLM Router API, including OpenAI-co
 chat completions with MCP XML tool parsing and rollback retry logic.
 """
 
+import json
 import logging
 import os
 import uuid
 from typing import Any
 
 import httpx
-from flask import Flask, jsonify, request, Response
+from flask import Flask, jsonify, request, Response, stream_with_context
 
 from llm_router.debug_log import log_debug
 from llm_router.llm_client import _get_env_float, _get_env_int, check_backend_health, list_models, make_llm_request
@@ -118,6 +119,392 @@ def format_parse_errors(errors: list[str]) -> str:
         f"Please regenerate the tool call with the correct format. "
         f"Do not apologize or explain - just output the corrected tool call."
     )
+
+
+def convert_responses_content_item(item: dict[str, Any]) -> str:
+    """Extract text from a Responses API content item.
+
+    Args:
+        item: Content item with type and text fields.
+
+    Returns:
+        Extracted text string.
+    """
+    if not isinstance(item, dict):
+        return ""
+
+    item_type = item.get("type")
+
+    if item_type in ("input_text", "text"):
+        return item.get("text", "")
+    elif item_type == "image_url":
+        # Skip images for now - would need multimodal handling
+        return ""
+
+    return ""
+
+
+def convert_responses_message_to_chat(msg: dict[str, Any]) -> dict[str, Any] | list[dict[str, Any]]:
+    """Convert Responses API message format to Chat Completions format.
+
+    Responses API: {"content": [{"type": "input_text", "text": "..."}], "role": "user"}
+    Or nested: {"content": [{"type": "message", "content": [...], "role": "..."}]}
+
+    Chat Completions: {"content": "...", "role": "user"}
+
+    Args:
+        msg: Message in Responses API format.
+
+    Returns:
+        Message in Chat Completions format, or list of messages if nested.
+    """
+    if not isinstance(msg, dict):
+        return {"role": "user", "content": ""}
+
+    role = msg.get("role", "user")
+    content = msg.get("content")
+    msg_type = msg.get("type")
+
+    # Handle string content directly
+    if isinstance(content, str):
+        return {"role": role, "content": content}
+
+    # Handle content array
+    if isinstance(content, list):
+        # Check if this contains nested messages (type: "message")
+        nested_messages = [item for item in content if isinstance(item, dict) and item.get("type") == "message"]
+
+        if nested_messages:
+            # Recursively convert nested messages
+            result = []
+            for nested in nested_messages:
+                converted = convert_responses_message_to_chat(nested)
+                if isinstance(converted, list):
+                    result.extend(converted)
+                else:
+                    result.append(converted)
+            return result
+
+        # Regular content array - extract text
+        text_parts = []
+        for item in content:
+            text = convert_responses_content_item(item)
+            if text:
+                text_parts.append(text)
+
+        return {"role": role, "content": "\n".join(text_parts)}
+
+    # Fallback
+    return {"role": role, "content": str(content) if content else ""}
+
+
+def flatten_responses_messages(messages: list[Any]) -> list[dict[str, Any]]:
+    """Flatten nested Responses API messages to Chat Completions format.
+
+    Args:
+        messages: List of messages in Responses API format (potentially nested).
+
+    Returns:
+        Flat list of messages in Chat Completions format.
+    """
+    result = []
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        converted = convert_responses_message_to_chat(msg)
+        if isinstance(converted, list):
+            result.extend(converted)
+        else:
+            result.append(converted)
+    return result
+
+
+@app.route('/v1/responses', methods=['POST'])
+def responses_api() -> tuple[Any, int]:
+    """Handle OpenAI Responses API endpoint.
+
+    The Responses API is a simpler API that uses `input` and `instructions`
+    instead of the `messages` array. This endpoint converts to Chat Completions
+    format and returns in Responses API format.
+
+    Returns:
+        Tuple of (response JSON, HTTP status code).
+    """
+    try:
+        data = request.get_json()
+
+        # Log client request
+        log_debug("CLIENT_REQUEST /v1/responses", {
+            "endpoint": "/v1/responses",
+            "method": "POST",
+            "data": data
+        })
+
+        model = data.get("model", "default")
+        instructions = data.get("instructions", "")
+        input_data = data.get("input", "")
+        tools = data.get("tools", [])
+
+        # Convert Responses API format to Chat Completions format
+        messages = []
+
+        # Add system instructions if provided
+        if instructions:
+            messages.append({"role": "system", "content": instructions})
+
+        # Handle input field - can be string or array of messages
+        if isinstance(input_data, str) and input_data:
+            messages.append({"role": "user", "content": input_data})
+        elif isinstance(input_data, list):
+            # input is an array of messages - convert and flatten
+            messages = flatten_responses_messages(input_data)
+            log_debug("CONVERTED_MESSAGES", {
+                "original_count": len(input_data),
+                "converted_count": len(messages),
+                "converted_messages": messages
+            })
+
+        # Handle messages array if provided (alternative format)
+        if "messages" in data:
+            # Convert and flatten Responses API message format to Chat Completions format
+            messages = flatten_responses_messages(data["messages"])
+            log_debug("CONVERTED_MESSAGES from messages field", {
+                "original_count": len(data["messages"]),
+                "converted_count": len(messages),
+                "converted_messages": messages
+            })
+
+        # Create working copy of messages
+        messages = [msg.copy() if isinstance(msg, dict) else msg for msg in messages]
+
+        payload = {k: v for k, v in data.items() if k not in ("messages", "tools", "input", "instructions")}
+        payload["model"] = model
+        payload["messages"] = messages
+
+        # Always force stream=False for internal processing
+        # (we need full response for tool parsing, then return as SSE if client requested streaming)
+        client_requested_stream = data.get("stream", False)
+        payload["stream"] = False
+
+        # Inject MCP system prompt if tools provided
+        if tools:
+            mcp_prompt = generate_mcp_system_prompt(tools, MCP_SERVER_NAME)
+            payload["messages"] = inject_system_prompt(messages, mcp_prompt)
+
+        # Rollback retry loop
+        retry_count = 0
+        llm_response = None
+        parse_result = None
+
+        while retry_count < MAX_ROLLBACK_RETRIES:
+            llm_response = make_llm_request(payload, LLM_BASE_URL, LLM_API_KEY)
+
+            choice = llm_response.get("choices", [{}])[0]
+            message = choice.get("message", {})
+            response_text = message.get("content", "")
+            reasoning_text = message.get("reasoning_content", "")
+
+            parse_result = parse_tool_calls(
+                response_text,
+                reasoning_text,
+                available_tools=tools
+            )
+
+            for warning in parse_result.warnings:
+                logger.warning(f"Tool call parsing: {warning}")
+
+            if not parse_result.success:
+                import re
+                tool_name = None
+                tool_match = re.search(r'<tool_name>([^<]+)</tool_name>', response_text)
+                if tool_match:
+                    tool_name = tool_match.group(1).strip()
+                else:
+                    json_match = re.search(r'"(?:tool_)?name"\s*:\s*"([^"]+)"', response_text)
+                    if json_match:
+                        tool_name = json_match.group(1).strip()
+
+                preview_text = response_text[:200] if response_text else ""
+                preview_clean = re.sub(r'<[^>]+>', '', preview_text).strip()
+                preview = preview_clean[:100] if preview_clean else "(no text content)"
+
+                for error in parse_result.errors:
+                    if tool_name:
+                        logger.warning(f"Tool call parsing: {error} | Tool: {tool_name} | Content: {preview}")
+                    else:
+                        logger.warning(f"Tool call parsing: {error} | Content: {preview}")
+
+            should_retry = (
+                not parse_result.success and
+                parse_result.errors and
+                has_incomplete_mcp_tags(response_text) and
+                retry_count < MAX_ROLLBACK_RETRIES - 1
+            )
+
+            if should_retry:
+                retry_count += 1
+                log_debug("ROLLBACK_RETRY", {
+                    "retry_count": retry_count,
+                    "max_retries": MAX_ROLLBACK_RETRIES,
+                    "parse_errors": parse_result.errors,
+                    "response_preview": response_text[:200] if response_text else None
+                })
+
+                logger.info(f"Rollback attempt {retry_count}/{MAX_ROLLBACK_RETRIES} - parse errors detected")
+
+                assistant_message = {"role": "assistant"}
+                has_tool_call_in_reasoning = reasoning_text and any([
+                    "<use_mcp_tool>" in reasoning_text,
+                    "[TOOL_CALL]" in reasoning_text,
+                    '"tool_name"' in reasoning_text,
+                    '"name"' in reasoning_text and '"arguments"' in reasoning_text
+                ])
+
+                if has_tool_call_in_reasoning:
+                    merged_content = f"{response_text}\n{reasoning_text}" if response_text else reasoning_text
+                    assistant_message["content"] = merged_content
+                else:
+                    assistant_message["content"] = response_text if response_text else ""
+
+                if assistant_message["content"]:
+                    payload["messages"].append(assistant_message)
+
+                error_message = format_parse_errors(parse_result.errors)
+                payload["messages"].append({
+                    "role": "user",
+                    "content": error_message
+                })
+
+                continue
+
+            break
+
+        # Build Responses API format response
+        output_text = response_text if not parse_result.success else None
+
+        # Convert usage format: prompt_tokens -> input_tokens, completion_tokens -> output_tokens
+        raw_usage = llm_response.get("usage", {})
+        usage = {
+            "input_tokens": raw_usage.get("prompt_tokens", 0),
+            "output_tokens": raw_usage.get("completion_tokens", 0),
+            "total_tokens": raw_usage.get("total_tokens", 0)
+        }
+
+        response = {
+            "id": llm_response.get("id", f"resp-{uuid.uuid4().hex[:8]}"),
+            "object": "response",
+            "created": llm_response.get("created", 0),
+            "model": model,
+            "output_text": output_text,
+            "usage": usage,
+            "status": "completed"
+        }
+
+        # Add tool_calls if parsing succeeded
+        if parse_result.success:
+            response["tool_calls"] = [tc.to_openai_format() for tc in parse_result.tool_calls]
+
+        # Add rollback metadata if retries occurred
+        if retry_count > 0:
+            response["_metadata"] = {
+                "rollback_attempts": retry_count,
+                "rollback_success": parse_result.success
+            }
+
+        # Log summary
+        usage = response.get("usage", {})
+        log_debug("CLIENT_RESPONSE /v1/responses", {
+            "status": "success",
+            "model": model,
+            "has_tool_calls": parse_result.success,
+            "tool_calls_count": len(parse_result.tool_calls) if parse_result.success else 0,
+            "rollback_attempts": retry_count if retry_count > 0 else None,
+            "usage": usage,
+            "response": response
+        })
+
+        # Check if client requested streaming - return as SSE
+        if client_requested_stream:
+            # Return SSE streaming response in Codex/OpenAI format
+            # Format based on codex fixture: event: <type>\ndata: <json>\n\n
+            def generate_sse():
+                # 1. Send response.created event (minimal format)
+                created_event = {
+                    "type": "response.created",
+                    "response": {"id": response["id"]}
+                }
+                yield f"event: response.created\ndata: {json.dumps(created_event)}\n\n"
+
+                # 2. Send response.output_item.done with the message content
+                if output_text:
+                    output_item_event = {
+                        "type": "response.output_item.done",
+                        "item": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": output_text}]
+                        }
+                    }
+                    yield f"event: response.output_item.done\ndata: {json.dumps(output_item_event)}\n\n"
+
+                # 3. Send tool calls if present (as function_call items)
+                if parse_result.success and parse_result.tool_calls:
+                    for tc in parse_result.tool_calls:
+                        tc_data = tc.to_openai_format()
+                        tool_call_event = {
+                            "type": "response.output_item.done",
+                            "item": {
+                                "type": "function_call",
+                                "id": tc_data.get("id", ""),
+                                "call_id": tc_data.get("id", ""),
+                                "name": tc_data["function"]["name"],
+                                "arguments": tc_data["function"]["arguments"]
+                            }
+                        }
+                        yield f"event: response.output_item.done\ndata: {json.dumps(tool_call_event)}\n\n"
+
+                # 4. Send response.completed event (minimal format)
+                completed_event = {
+                    "type": "response.completed",
+                    "response": {
+                        "id": response["id"],
+                        "usage": {
+                            "input_tokens": usage["input_tokens"],
+                            "output_tokens": usage["output_tokens"],
+                            "total_tokens": usage["total_tokens"]
+                        }
+                    }
+                }
+                yield f"event: response.completed\ndata: {json.dumps(completed_event)}\n\n"
+
+            return Response(
+                stream_with_context(generate_sse()),
+                mimetype='text/event-stream',
+                headers={
+                    'Cache-Control': 'no-cache',
+                    'X-Accel-Buffering': 'no'
+                }
+            )
+
+        return jsonify(response)
+
+        return jsonify(response)
+
+    except Exception as e:
+        logger.exception("Error in responses_api")
+
+        log_debug("CLIENT_RESPONSE /v1/responses ERROR", {
+            "status": "error",
+            "error_type": type(e).__name__,
+            "error_message": str(e)
+        })
+
+        return jsonify({
+            "error": {
+                "type": "server_error",
+                "message": "An internal error occurred. Please try again later."
+            }
+        }), 500
 
 
 @app.route('/v1/chat/completions', methods=['POST'])
@@ -570,6 +957,7 @@ def index() -> Any:
         "description": "API router with OpenAI format and MCP tool parsing",
         "endpoints": {
             "openai": "/v1/chat/completions",
+            "responses": "/v1/responses",
             "models": "/v1/models",
             "health": "/health",
             "liveness": "/liveness",

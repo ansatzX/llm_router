@@ -71,20 +71,34 @@ Here are the functions available in JSONSchema format:
 
     tools_section = []
     for i, tool in enumerate(tools):
-        if tool.get("type") == "function":
+        # Handle three formats:
+        # 1. Chat Completions: {"type": "function", "function": {"name": ...}}
+        # 2. Responses API: {"type": "function", "name": ..., "parameters": ...}
+        # 3. Direct function: {"name": ..., "description": ..., "parameters": ...}
+        if tool.get("type") == "function" and "function" in tool:
+            # Chat Completions format
             func = tool["function"]
-            tool_name = func.get("name", "unknown")
-            description = func.get("description", "")
-            parameters = func.get("parameters", {})
+        elif tool.get("type") == "function" and "name" in tool:
+            # Responses API format - merge into func dict
+            func = tool
+        elif "name" in tool:
+            # Direct function format
+            func = tool
+        else:
+            continue
 
-            if i > 0:
-                tools_section.append("\n")
+        tool_name = func.get("name", "unknown")
+        description = func.get("description", "")
+        parameters = func.get("parameters", {})
 
-            tools_section.append(
-                f"### Tool name: {tool_name}\n"
-                f"Description: {description}\n\n"
-                f"Input JSON schema: {json.dumps(parameters, ensure_ascii=False)}\n"
-            )
+        if i > 0:
+            tools_section.append("\n")
+
+        tools_section.append(
+            f"### Tool name: {tool_name}\n"
+            f"Description: {description}\n\n"
+            f"Input JSON schema: {json.dumps(parameters, ensure_ascii=False)}\n"
+        )
 
     suffix = "\n# General Objective\n\nYou accomplish a given task iteratively, breaking it down into clear steps and working through them methodically.\n"
 
