@@ -1,26 +1,26 @@
-"""
-MCP XML format conversion utilities.
+"""MCP XML format conversion utilities.
 
-Simplified version: Generate MCP system prompts from OpenAI tools format.
+This module provides utilities for generating MCP system prompts from OpenAI tools format
+to instruct LLMs on using MCP XML tags for tool calls.
 """
 
 import json
 from datetime import datetime
+from typing import Any
 
 
-def generate_mcp_system_prompt(tools: list, server_name: str = "tools") -> str:
-    """
-    Generate MCP-style system prompt from OpenAI tools format.
+def generate_mcp_system_prompt(tools: list[dict[str, Any]], server_name: str = "tools") -> str:
+    """Generate MCP-style system prompt from OpenAI tools format.
 
     This prompt instructs the LLM to use <use_mcp_tool> XML format for tool calls,
     which can then be parsed and converted back to OpenAI format.
 
     Args:
-        tools: List of tools in OpenAI format [{"type": "function", "function": {...}}]
-        server_name: Server name to use in MCP format (default: "tools")
+        tools: List of tools in OpenAI format with 'type' and 'function' keys.
+        server_name: Server name to use in MCP format. Defaults to 'tools'.
 
     Returns:
-        System prompt string with MCP tool instructions, or empty string if no tools
+        System prompt string with MCP tool instructions, or empty string if no tools.
     """
     if not tools:
         return ""

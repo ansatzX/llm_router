@@ -1,38 +1,74 @@
-"""XML format parser for tool calls."""
-import json
-import regex as re  # Use regex library for better Unicode support
+"""XML format parser for tool calls.
 
+This module provides parsing for multiple XML-based tool call formats including
+MCP XML, TOOL_CALL XML, and simple XML tags.
+"""
+
+import json
+from typing import Any
+
+import regex as re  # Use regex library for better Unicode support
 from json_repair import repair_json
 
-from .base import MAX_CONTENT_SIZE, ParseResult, ToolCall, ToolCallParser, ToolNameResolver, validate_tool_arguments
-from .errors import ValidationError, XMLParseError
-from .validator import validate_tool_call
+from llm_router.parser.base import (
+    MAX_CONTENT_SIZE,
+    ParseResult,
+    ToolCall,
+    ToolCallParser,
+    ToolNameResolver,
+    validate_tool_arguments,
+)
+from llm_router.parser.errors import ValidationError, XMLParseError
+from llm_router.parser.validator import validate_tool_call
 
 
 class XMLParser(ToolCallParser):
-    """Parser for XML format tool calls."""
+    """Parser for XML format tool calls.
+
+    Supports multiple XML formats:
+    - MCP: <use_mcp_tool>...</use_mcp_tool>
+    - TOOL_CALL: [TOOL_CALL]...[/TOOL_CALL]
+    - Simple: <tool>...</tool>
+    """
 
     # XML patterns for different formats
-    PATTERNS = {
+    PATTERNS: dict[str, str] = {
         'mcp': r'<use_mcp_tool>(.*?)</use_mcp_tool>',
         'tool_call': r'\[TOOL_CALL\](.*?)\[/TOOL_CALL\]',
         'simple': r'<tool>(.*?)</tool>',
     }
 
     # Tag name fallbacks
-    TOOL_NAME_TAGS = ['tool_name', 'function_name', 'name', 'function', 'action']
-    ARGUMENT_TAGS = ['arguments', 'parameters', 'input', 'params', 'args']
+    TOOL_NAME_TAGS: list[str] = ['tool_name', 'function_name', 'name', 'function', 'action']
+    ARGUMENT_TAGS: list[str] = ['arguments', 'parameters', 'input', 'params', 'args']
 
-    def __init__(self, resolver: ToolNameResolver | None = None):
-        """Initialize parser with optional tool name resolver."""
+    def __init__(self, resolver: ToolNameResolver | None = None) -> None:
+        """Initialize parser with optional tool name resolver.
+
+        Args:
+            resolver: Optional ToolNameResolver instance for name resolution.
+        """
         self.resolver = resolver or ToolNameResolver()
 
     @property
     def format_name(self) -> str:
+        """Parser format name for debugging.
+
+        Returns:
+            String 'xml' identifying this parser.
+        """
         return "xml"
 
-    def parse(self, content: str, available_tools: list[dict] | None = None) -> ParseResult:
-        """Parse XML format tool calls."""
+    def parse(self, content: str, available_tools: list[dict[str, Any]] | None = None) -> ParseResult:
+        """Parse XML format tool calls.
+
+        Args:
+            content: Content string to parse for XML tool calls.
+            available_tools: Optional list of available tools for validation.
+
+        Returns:
+            ParseResult with success status, tool_calls, errors, and warnings.
+        """
         # Size limit
         if len(content) > MAX_CONTENT_SIZE:
             content = content[:MAX_CONTENT_SIZE]
@@ -113,9 +149,23 @@ class XMLParser(ToolCallParser):
         content: str,
         has_server_name: bool,
         format_type: str = 'mcp',
-        available_tools: list[dict] | None = None
+        available_tools: list[dict[str, Any]] | None = None
     ) -> ToolCall | None:
-        """Parse single XML block."""
+        """Parse single XML block.
+
+        Args:
+            content: XML content string to parse.
+            has_server_name: True if format includes server_name tag.
+            format_type: Type of XML format ('mcp', 'tool_call', 'simple').
+            available_tools: Optional list of available tools for validation.
+
+        Returns:
+            ToolCall instance if parsing succeeds, None otherwise.
+
+        Raises:
+            ValidationError: If required fields are missing.
+            XMLParseError: If XML parsing fails.
+        """
         # TOOL_CALL format contains JSON, not XML
         if format_type == 'tool_call':
             return self._parse_tool_call_json(content, available_tools)
@@ -147,8 +197,20 @@ class XMLParser(ToolCallParser):
             server_name=server_name
         )
 
-    def _parse_tool_call_json(self, content: str, available_tools: list[dict] | None = None) -> ToolCall | None:
-        """Parse TOOL_CALL format with JSON content."""
+    def _parse_tool_call_json(self, content: str, available_tools: list[dict[str, Any]] | None = None) -> ToolCall | None:
+        """Parse TOOL_CALL format with JSON content.
+
+        Args:
+            content: JSON content string from TOOL_CALL tag.
+            available_tools: Optional list of available tools for validation.
+
+        Returns:
+            ToolCall instance if parsing succeeds.
+
+        Raises:
+            ValidationError: If required fields are missing.
+            XMLParseError: If JSON parsing fails.
+        """
         try:
             data = json.loads(content.strip())
         except json.JSONDecodeError:
@@ -181,15 +243,33 @@ class XMLParser(ToolCallParser):
         )
 
     def _extract_tag(self, content: str, tag_names: list[str]) -> str | None:
-        """Extract content from first matching tag."""
+        """Extract content from first matching tag.
+
+        Args:
+            content: XML content string to search.
+            tag_names: List of tag names to try in order.
+
+        Returns:
+            Tag content if found, None otherwise.
+        """
         for tag in tag_names:
             match = re.search(rf'<{tag}>(.*?)</{tag}>', content, re.DOTALL)
             if match:
                 return match.group(1).strip()
         return None
 
-    def _parse_arguments(self, args_text: str) -> dict:
-        """Parse JSON arguments with repair fallback."""
+    def _parse_arguments(self, args_text: str) -> dict[str, Any]:
+        """Parse JSON arguments with repair fallback.
+
+        Args:
+            args_text: JSON string containing tool arguments.
+
+        Returns:
+            Parsed arguments dictionary.
+
+        Raises:
+            XMLParseError: If JSON parsing fails even after repair.
+        """
         try:
             return json.loads(args_text.strip())
         except json.JSONDecodeError:

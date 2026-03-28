@@ -1,24 +1,54 @@
-"""JSON format parser for tool calls."""
-import json
+"""JSON format parser for tool calls.
 
-from .base import MAX_CONTENT_SIZE, ParseResult, ToolCall, ToolCallParser, ToolNameResolver, validate_tool_arguments
-from .errors import JSONParseError, ValidationError
-from .validator import validate_tool_call
+This module provides parsing for JSON-based tool call formats including
+standalone JSON objects and embedded JSON in text.
+"""
+
+import json
+from typing import Any
+
+from llm_router.parser.base import (
+    MAX_CONTENT_SIZE,
+    ParseResult,
+    ToolCall,
+    ToolCallParser,
+    ToolNameResolver,
+    validate_tool_arguments,
+)
+from llm_router.parser.errors import JSONParseError, ValidationError
+from llm_router.parser.validator import validate_tool_call
 
 
 class JSONParser(ToolCallParser):
     """Parser for JSON format tool calls."""
 
-    def __init__(self, resolver: ToolNameResolver | None = None):
-        """Initialize parser with optional tool name resolver."""
+    def __init__(self, resolver: ToolNameResolver | None = None) -> None:
+        """Initialize parser with optional tool name resolver.
+
+        Args:
+            resolver: Optional ToolNameResolver instance for name resolution.
+        """
         self.resolver = resolver or ToolNameResolver()
 
     @property
     def format_name(self) -> str:
+        """Parser format name for debugging.
+
+        Returns:
+            String 'json' identifying this parser.
+        """
         return "json"
 
-    def parse(self, content: str, available_tools: list[dict] | None = None) -> ParseResult:
-        """Parse JSON format tool calls."""
+    def parse(self, content: str, available_tools: list[dict[str, Any]] | None = None) -> ParseResult:
+        """Parse JSON format tool calls.
+
+        Args:
+            content: Content string to parse for JSON tool calls.
+            available_tools: Optional list of available tools for validation.
+
+        Returns:
+            ParseResult with success status, tool_calls, errors, and warnings.
+        """
         # Size limit
         if len(content) > MAX_CONTENT_SIZE:
             content = content[:MAX_CONTENT_SIZE]
@@ -82,13 +112,19 @@ class JSONParser(ToolCallParser):
             else:
                 return ParseResult.error(["No JSON tool calls found"], warnings)
 
-    def _extract_json_objects(self, content: str) -> list:
+    def _extract_json_objects(self, content: str) -> list[str]:
         """Extract all potential JSON objects from content.
 
         Handles braces inside string values correctly by tracking string
         boundaries and escape sequences.
+
+        Args:
+            content: Content string to search for JSON objects.
+
+        Returns:
+            List of JSON string candidates.
         """
-        objects = []
+        objects: list[str] = []
         i = 0
 
         while i < len(content):
@@ -129,8 +165,20 @@ class JSONParser(ToolCallParser):
 
         return objects
 
-    def _parse_single_json(self, json_str: str, available_tools: list[dict] | None = None) -> ToolCall | None:
-        """Parse single JSON object."""
+    def _parse_single_json(self, json_str: str, available_tools: list[dict[str, Any]] | None = None) -> ToolCall | None:
+        """Parse single JSON object.
+
+        Args:
+            json_str: JSON string to parse.
+            available_tools: Optional list of available tools for validation.
+
+        Returns:
+            ToolCall instance if parsing succeeds.
+
+        Raises:
+            ValidationError: If required fields are missing.
+            JSONParseError: If JSON parsing fails.
+        """
         from json_repair import repair_json
 
         # Parse JSON

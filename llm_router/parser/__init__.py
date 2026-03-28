@@ -1,18 +1,29 @@
-"""
-Parser module for extracting tool calls from LLM responses.
+"""Parser module for extracting tool calls from LLM responses.
+
+This module provides the main entry point for parsing tool calls from
+LLM response content in multiple formats (XML and JSON).
 
 Public API:
-- parse_tool_calls(): Main entry point for parsing
-- ToolCall: Data class for tool call information
-- ParseResult: Result container with tool_calls/errors/warnings
-- ParseError: Base exception for parsing errors
-- ToolNameResolver: Resolve tool names from server_name and tool_name
+    parse_tool_calls(): Main entry point for parsing
+    ToolCall: Data class for tool call information
+    ParseResult: Result container with tool_calls/errors/warnings
+    ParseError: Base exception for parsing errors
+    ToolNameResolver: Resolve tool names from server_name and tool_name
+
+Example:
+    >>> from llm_router.parser import parse_tool_calls
+    >>> result = parse_tool_calls(response_text)
+    >>> if result.success:
+    ...     for tool_call in result.tool_calls:
+    ...         print(tool_call.tool_name)
 """
 
-from .base import ParseResult, ToolCall, ToolNameResolver
-from .errors import ParseError
+from typing import Any
 
-__all__ = [
+from llm_router.parser.base import ParseResult, ToolCall, ToolNameResolver
+from llm_router.parser.errors import ParseError
+
+__all__: list[str] = [
     'ToolCall',
     'ParseResult',
     'ParseError',
@@ -24,26 +35,25 @@ __all__ = [
 def parse_tool_calls(
     content: str,
     reasoning_content: str = "",
-    prefer_format: str = None,
-    available_tools: list[dict] | None = None
+    prefer_format: str | None = None,
+    available_tools: list[dict[str, Any]] | None = None
 ) -> ParseResult:
-    """
-    Parse tool calls from LLM response content.
+    """Parse tool calls from LLM response content.
 
     Args:
-        content: Main response content
-        reasoning_content: Reasoning content (MiroThinker may put tool calls here)
-        prefer_format: Optional hint - "xml" or "json" to try that parser first
-        available_tools: List of available tools in OpenAI format for name resolution
+        content: Main response content string.
+        reasoning_content: Reasoning content string (MiroThinker may put tool calls here).
+        prefer_format: Optional format hint - 'xml' or 'json' to try that parser first.
+        available_tools: List of available tools in OpenAI format for name resolution.
 
     Returns:
-        ParseResult with success status, tool_calls, errors, and warnings
+        ParseResult with success status, tool_calls, errors, and warnings.
 
     Note:
-        - Content and reasoning_content are merged before parsing
-        - Returns first successful parser result (partial success is success)
-        - Errors/warnings aggregated from failed parsers if all fail
-        - Tool names are resolved using server_name if available
+        - Content and reasoning_content are merged before parsing.
+        - Returns first successful parser result (partial success is success).
+        - Errors/warnings aggregated from failed parsers if all fail.
+        - Tool names are resolved using server_name if available.
     """
     from .json_parser import JSONParser
     from .xml_parser import XMLParser

@@ -1,24 +1,27 @@
-"""Parser base classes and data structures."""
+"""Parser base classes and data structures.
+
+This module provides the abstract base class for tool call parsers and
+common data structures used throughout the parser module.
+"""
+
 from __future__ import annotations
 
 import json
 import uuid
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any
 
-
 # Maximum content size for parsing (10MB)
-MAX_CONTENT_SIZE = 10 * 1024 * 1024
+MAX_CONTENT_SIZE: int = 10 * 1024 * 1024
 
 
 def validate_tool_arguments(
     tool_name: str,
     arguments: dict[str, Any],
-    tool_schema: dict | None
+    tool_schema: dict[str, Any] | None
 ) -> list[str]:
-    """
-    Validate tool arguments against schema.
+    """Validate tool arguments against schema.
 
     Performs basic validation:
     - Checks required fields are present
@@ -26,18 +29,18 @@ def validate_tool_arguments(
     - Does NOT validate nested schemas or complex types
 
     Args:
-        tool_name: Name of the tool (for error messages)
-        arguments: Parsed arguments to validate
-        tool_schema: Tool schema in OpenAI format
+        tool_name: Name of the tool for error messages.
+        arguments: Parsed arguments to validate.
+        tool_schema: Tool schema in OpenAI format.
 
     Returns:
-        List of validation error messages (empty if valid)
+        List of validation error messages, empty if valid.
     """
     if not tool_schema:
         # No schema available, skip validation
         return []
 
-    errors = []
+    errors: list[str] = []
 
     # Extract parameter schema
     params = tool_schema.get("function", {}).get("parameters", {})
@@ -64,13 +67,23 @@ def validate_tool_arguments(
 
 @dataclass
 class ToolCall:
-    """Represents a parsed tool call."""
+    """Represents a parsed tool call.
+
+    Attributes:
+        tool_name: Name of the tool to call.
+        arguments: Dictionary of arguments for the tool.
+        server_name: Name of the MCP server providing the tool.
+    """
     tool_name: str
     arguments: dict[str, Any]
     server_name: str = "tools"
 
-    def to_openai_format(self) -> dict:
-        """Convert to OpenAI tool_calls format."""
+    def to_openai_format(self) -> dict[str, Any]:
+        """Convert to OpenAI tool_calls format.
+
+        Returns:
+            Dictionary in OpenAI tool_calls format with id, type, and function.
+        """
         return {
             "id": f"call_{uuid.uuid4().hex[:8]}",
             "type": "function",
@@ -84,7 +97,8 @@ class ToolCall:
 class ToolNameResolver:
     """Resolve tool names by combining server_name and tool_name."""
 
-    def __init__(self):
+    def __init__(self) -> None:
+        """Initialize the resolver with an empty cache."""
         # Cache: (server_name, tool_name) -> resolved_name
         self._cache: dict[tuple[str, str], str] = {}
 
@@ -92,18 +106,17 @@ class ToolNameResolver:
         self,
         server_name: str,
         tool_name: str,
-        available_tools: list[dict] | None = None
+        available_tools: list[dict[str, Any]] | None = None
     ) -> str:
-        """
-        Resolve the actual tool name by combining server_name and tool_name.
+        """Resolve the actual tool name by combining server_name and tool_name.
 
         Args:
-            server_name: Server name from MCP XML
-            tool_name: Tool name from MCP XML
-            available_tools: List of available tools in OpenAI format
+            server_name: Server name from MCP XML.
+            tool_name: Tool name from MCP XML.
+            available_tools: List of available tools in OpenAI format.
 
         Returns:
-            Resolved tool name
+            Resolved tool name.
         """
         # Default server: return tool_name as-is
         if not server_name or server_name == "default" or server_name == "tools":
@@ -119,7 +132,7 @@ class ToolNameResolver:
             return tool_name
 
         # Find matching tool in available tools
-        candidates = []
+        candidates: list[str] = []
         for tool in available_tools:
             if tool.get("type") == "function":
                 func = tool.get("function", {})
@@ -144,14 +157,21 @@ class ToolNameResolver:
         # No match: return tool_name
         return tool_name
 
-    def clear_cache(self):
+    def clear_cache(self) -> None:
         """Clear the resolution cache."""
         self._cache.clear()
 
 
 @dataclass(frozen=True)
 class ParseResult:
-    """Result of parsing tool calls."""
+    """Result of parsing tool calls.
+
+    Attributes:
+        success: True if parsing succeeded and tool_calls were found.
+        tool_calls: List of parsed tool calls.
+        errors: List of error messages from parsing.
+        warnings: List of warning messages from parsing.
+    """
     success: bool
     tool_calls: list[ToolCall]
     errors: list[str]
@@ -159,7 +179,15 @@ class ParseResult:
 
     @classmethod
     def ok(cls, tool_calls: list[ToolCall], warnings: list[str] | None = None) -> ParseResult:
-        """Create successful parse result."""
+        """Create successful parse result.
+
+        Args:
+            tool_calls: List of successfully parsed tool calls.
+            warnings: Optional list of warning messages.
+
+        Returns:
+            ParseResult instance with success=True.
+        """
         return cls(
             success=True,
             tool_calls=tool_calls,
@@ -169,7 +197,15 @@ class ParseResult:
 
     @classmethod
     def error(cls, errors: list[str], warnings: list[str] | None = None) -> ParseResult:
-        """Create failed parse result."""
+        """Create failed parse result.
+
+        Args:
+            errors: List of error messages.
+            warnings: Optional list of warning messages.
+
+        Returns:
+            ParseResult instance with success=False.
+        """
         return cls(
             success=False,
             tool_calls=[],
@@ -182,12 +218,24 @@ class ToolCallParser(ABC):
     """Abstract base class for tool call parsers."""
 
     @abstractmethod
-    def parse(self, content: str) -> ParseResult:
-        """Parse content and return result with all found tool calls."""
+    def parse(self, content: str, available_tools: list[dict[str, Any]] | None = None) -> ParseResult:
+        """Parse content and return result with all found tool calls.
+
+        Args:
+            content: Content string to parse for tool calls.
+            available_tools: Optional list of available tools for validation.
+
+        Returns:
+            ParseResult with success status, tool_calls, errors, and warnings.
+        """
         pass
 
     @property
     @abstractmethod
     def format_name(self) -> str:
-        """Parser format name for debugging."""
+        """Parser format name for debugging.
+
+        Returns:
+            String identifier for this parser format (e.g., 'xml', 'json').
+        """
         pass

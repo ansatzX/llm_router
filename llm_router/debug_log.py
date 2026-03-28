@@ -1,21 +1,30 @@
-"""
-Debug logging module for LLM Router.
+"""Debug logging module for LLM Router.
 
 Provides centralized debug logging to file when DEBUG_MODE is enabled.
+Log entries include timestamps, message labels, and optional data payloads.
 """
 
 import json
 from datetime import datetime
+from typing import Any
 
-DEBUG_MODE = False
-DEBUG_LOG_FILE = "llm_router.log"
+DEBUG_MODE: bool = False
+DEBUG_LOG_FILE: str = "llm_router.log"
 
 # Keep file handle open during debug mode for better I/O performance
-_LOG_FILE_HANDLE = None
+_LOG_FILE_HANDLE: Any = None
 
 
-def set_debug_mode(enabled: bool):
-    """Enable or disable debug mode."""
+def set_debug_mode(enabled: bool) -> None:
+    """Enable or disable debug mode.
+
+    Args:
+        enabled: True to enable debug logging, False to disable.
+
+    Note:
+        The file handle is intentionally kept open during debug mode for
+        better I/O performance, rather than opening/closing for each log entry.
+    """
     global DEBUG_MODE, _LOG_FILE_HANDLE
     DEBUG_MODE = enabled
 
@@ -25,16 +34,25 @@ def set_debug_mode(enabled: bool):
         _LOG_FILE_HANDLE = None
 
     # Open file handle if debug mode is enabled
+    # Note: File handle intentionally kept open for performance
     if enabled:
-        _LOG_FILE_HANDLE = open(DEBUG_LOG_FILE, "a", encoding="utf-8")
+        _LOG_FILE_HANDLE = open(DEBUG_LOG_FILE, "a", encoding="utf-8")  # noqa: SIM115
 
 
-def _truncate_large_content(data: dict, max_length: int = 500) -> dict:
-    """Truncate large content fields for readability."""
+def _truncate_large_content(data: dict[str, Any], max_length: int = 500) -> dict[str, Any]:
+    """Truncate large content fields for readability.
+
+    Args:
+        data: Dictionary with potentially large string values.
+        max_length: Maximum length for string values before truncation.
+
+    Returns:
+        Dictionary with truncated string values.
+    """
     if not isinstance(data, dict):
         return data
 
-    result = {}
+    result: dict[str, Any] = {}
     for key, value in data.items():
         if isinstance(value, str) and len(value) > max_length:
             result[key] = value[:max_length] + f"... (truncated, {len(value)} total chars)"
@@ -47,22 +65,23 @@ def _truncate_large_content(data: dict, max_length: int = 500) -> dict:
     return result
 
 
-def log_debug(message: str, data: dict = None, truncate: bool = True):
+def log_debug(message: str, data: dict[str, Any] | None = None, truncate: bool = True) -> None:
     """Log debug message to file if debug mode is enabled.
 
     Args:
-        message: Log message/label
-        data: Optional data dictionary to log
-        truncate: If True, truncate large content fields for readability
+        message: Log message or label describing the entry.
+        data: Optional data dictionary to log with the message.
+        truncate: If True, truncate large content fields for readability.
     """
     if not DEBUG_MODE:
         return
 
     global _LOG_FILE_HANDLE
 
-    # Re-open file if handle was closed
+    # Re-open file if handle was closed (e.g., after set_debug_mode(False))
+    # Note: File handle intentionally kept open for performance
     if _LOG_FILE_HANDLE is None:
-        _LOG_FILE_HANDLE = open(DEBUG_LOG_FILE, "a", encoding="utf-8")
+        _LOG_FILE_HANDLE = open(DEBUG_LOG_FILE, "a", encoding="utf-8")  # noqa: SIM115
 
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     _LOG_FILE_HANDLE.write(f"\n{'='*80}\n")

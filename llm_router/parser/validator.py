@@ -1,20 +1,26 @@
-"""Tool call validation functions."""
-from .base import ToolCall
+"""Tool call validation functions.
+
+This module provides validation utilities for checking tool call
+completeness and sanitizing arguments.
+"""
+
+from typing import Any
+
+from llm_router.parser.base import ToolCall
 
 
 def validate_tool_call(tool_call: ToolCall) -> tuple[bool, str | None]:
-    """
-    Validate tool call data completeness.
+    """Validate tool call data completeness.
 
     Args:
-        tool_call: Tool call to validate
+        tool_call: Tool call instance to validate.
 
     Returns:
-        Tuple of (is_valid, warning_message)
-        - is_valid: True if tool call can be used
-        - warning_message: Warning if valid but has issues, error if invalid
+        Tuple of (is_valid, warning_message) where:
+        - is_valid: True if tool call can be used.
+        - warning_message: Warning if valid but has issues, error if invalid.
     """
-    warnings = []
+    warnings: list[str] = []
 
     # Check tool_name
     if not tool_call.tool_name:
@@ -41,15 +47,14 @@ def validate_tool_call(tool_call: ToolCall) -> tuple[bool, str | None]:
     return True, warning_msg
 
 
-def sanitize_arguments(arguments: dict) -> dict:
-    """
-    Clean arguments by removing None values.
+def sanitize_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Clean arguments by removing None values.
 
     Args:
-        arguments: Raw arguments dict
+        arguments: Raw arguments dictionary.
 
     Returns:
-        Cleaned arguments dict with None values removed
+        Cleaned arguments dictionary with None values removed.
     """
     if not isinstance(arguments, dict):
         return {}
