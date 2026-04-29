@@ -59,6 +59,97 @@ def test_parse_tool_call_xml_format():
     assert result.tool_calls[0].tool_name == "read_file"
 
 
+def test_parse_codex_tool_calls_xml_format():
+    """Test parsing Codex-style XML tool_calls blocks."""
+    parser = XMLParser()
+    content = """
+<tool_calls>
+  <tool_call name="read">
+    <parameter name="filePath" string="true">/Users/test/file.txt</parameter>
+  </tool_call>
+</tool_calls>
+"""
+    result = parser.parse(content)
+
+    assert result.success is True
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].tool_name == "read"
+    assert result.tool_calls[0].arguments == {"filePath": "/Users/test/file.txt"}
+
+
+def test_parse_bare_codex_tool_call_blocks():
+    """Test parsing multiple bare Codex-style tool_call blocks."""
+    parser = XMLParser()
+    content = """
+<tool_call name="ls">
+  <parameter name="path" string="true">/Users/ansatz/data/code/MOKIT</parameter>
+</tool_call>
+<tool_call name="rg">
+  <parameter name="pattern" string="true">MOKIT</parameter>
+  <parameter name="path" string="true">/Users/ansatz/data/code/MOKIT/README.md</parameter>
+  <parameter name="max_count" string="false">10</parameter>
+</tool_call>
+"""
+    result = parser.parse(content)
+
+    assert result.success is True
+    assert len(result.tool_calls) == 2
+    assert result.tool_calls[0].tool_name == "ls"
+    assert result.tool_calls[0].arguments == {
+        "path": "/Users/ansatz/data/code/MOKIT",
+    }
+    assert result.tool_calls[1].tool_name == "rg"
+    assert result.tool_calls[1].arguments == {
+        "pattern": "MOKIT",
+        "path": "/Users/ansatz/data/code/MOKIT/README.md",
+        "max_count": 10,
+    }
+
+
+def test_codex_tool_call_parameter_types():
+    """Test string=false parameters are parsed as JSON scalars."""
+    parser = XMLParser()
+    content = """
+<tool_call name="example">
+  <parameter name="limit" string="false">10</parameter>
+  <parameter name="recursive" string="false">true</parameter>
+  <parameter name="label" string="true">10</parameter>
+</tool_call>
+"""
+    result = parser.parse(content)
+
+    assert result.success is True
+    assert result.tool_calls[0].arguments == {
+        "limit": 10,
+        "recursive": True,
+        "label": "10",
+    }
+
+
+def test_unknown_codex_tool_call_fails_when_tools_are_known():
+    """Unknown model-invented tool names should trigger retry instead of execution."""
+    parser = XMLParser()
+    content = """
+<tool_call name="ls">
+  <parameter name="path" string="true">/tmp</parameter>
+</tool_call>
+"""
+    result = parser.parse(
+        content,
+        available_tools=[
+            {
+                "type": "function",
+                "function": {"name": "exec_command", "parameters": {"type": "object"}},
+            }
+        ],
+    )
+
+    assert result.success is False
+    assert result.tool_calls == []
+    assert "Unknown tool 'ls'" in result.errors[0]
+    assert "exec_command" in result.errors[0]
+
+
 def test_parse_simple_tool_xml():
     """Test parsing simple <tool> XML format."""
     parser = XMLParser()

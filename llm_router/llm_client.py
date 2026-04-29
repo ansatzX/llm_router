@@ -336,7 +336,7 @@ def check_backend_health(
                 "error": "Connection refused",
                 "endpoint": endpoint
             }
-        except Exception as e:
+        except Exception:
             # Try next endpoint on other errors
             continue
 

@@ -1,0 +1,58 @@
+[server]
+host = "127.0.0.1"
+port = 9876
+session_ttl_seconds = 3600
+max_rollback_retries = 3
+mcp_server_name = "tools"
+
+# ── Upstream LLM providers ─────────────────────────────────────────────────
+
+[upstream.default]
+base_url = "https://aihubmix.com/v1"
+api_key_env = "AIHUBMIX_API_KEY"
+
+[upstream.deepseek]
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+
+[upstream.mirothinker]
+base_url = "http://localhost:8000/v1"
+api_key = "not-needed"
+
+# ── Model routing ──────────────────────────────────────────────────────────
+# Pattern matching: first match wins.
+#
+# model_type:
+#   "mcp_first" - Inject MCP XML tool prompt. Model outputs XML tool calls
+#                 which the router parses and converts to OpenAI format.
+#                 Tools come from Codex, execution happens locally.
+#   "responses" - Stateful. Accumulate conversation items in session store,
+#                 convert to Chat API format, forward to upstream.
+#   "chat"       - Stateless. Convert Responses API input to Chat format,
+#                 forward to upstream. No session accumulation.
+
+[[routes]]
+pattern = "mirothinker-*"
+type = "mcp_first"
+upstream = "mirothinker"
+
+[[routes]]
+pattern = "deepseek-*"
+type = "chat"
+upstream = "deepseek"
+
+[[routes]]
+pattern = "gpt-*"
+type = "responses"
+upstream = "default"
+
+[[routes]]
+pattern = "claude-*"
+type = "responses"
+upstream = "default"
+
+# ── Default fallback ───────────────────────────────────────────────────────
+
+[default_route]
+type = "responses"
+upstream = "default"

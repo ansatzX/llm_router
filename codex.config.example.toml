@@ -1,0 +1,15 @@
+model_provider = "llm_router"
+model = "deepseek-v4-pro"
+model_reasoning_effort = "xhigh"
+model_catalog_json = "~/.codex/llm_router.json"
+  
+[model_providers]
+
+[model_providers.llm_router]
+name = "llm_router"
+base_url = "http://127.0.0.1:9876/v1"
+env_key = "AIHUBMIX_API_KEY"
+wire_api = "responses"
+requires_openai_auth = false
+model_catalog_json = "~/.codex/llm_router.json"
+

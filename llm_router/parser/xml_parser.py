@@ -34,6 +34,8 @@ class XMLParser(ToolCallParser):
     # XML patterns for different formats
     PATTERNS: dict[str, str] = {
         'mcp': r'<use_mcp_tool>(.*?)</use_mcp_tool>',
+        'codex_tool_calls': r'<tool_calls>(.*?)</tool_calls>',
+        'bare_codex_tool_call': r'(<tool_call\s+name="[^"]+"[^>]*>.*?</tool_call>)',
         'tool_call': r'\[TOOL_CALL\](.*?)\[/TOOL_CALL\]',
         'simple': r'<tool>(.*?)</tool>',
     }
@@ -87,14 +89,22 @@ class XMLParser(ToolCallParser):
 
             for match_content in matches:
                 try:
-                    tool_call = self._parse_single_xml(
-                        match_content,
-                        has_server_name=(format_type == 'mcp'),
-                        format_type=format_type,
-                        available_tools=available_tools
+                    parsed_calls = (
+                        self._parse_codex_tool_calls(match_content, available_tools)
+                        if format_type in ('codex_tool_calls', 'bare_codex_tool_call')
+                        else [
+                            self._parse_single_xml(
+                                match_content,
+                                has_server_name=(format_type == 'mcp'),
+                                format_type=format_type,
+                                available_tools=available_tools
+                            )
+                        ]
                     )
 
-                    if tool_call:
+                    for tool_call in parsed_calls:
+                        if not tool_call:
+                            continue
                         # Validate basic structure
                         is_valid, warning = validate_tool_call(tool_call)
                         if warning:
@@ -169,6 +179,11 @@ class XMLParser(ToolCallParser):
         # TOOL_CALL format contains JSON, not XML
         if format_type == 'tool_call':
             return self._parse_tool_call_json(content, available_tools)
+        if format_type == 'codex_tool_calls':
+            raise ValidationError(
+                "Codex tool_calls blocks must be parsed as a group",
+                context=content[:100],
+            )
 
         # Extract server_name (if present)
         if has_server_name:
@@ -196,6 +211,77 @@ class XMLParser(ToolCallParser):
             arguments=arguments,
             server_name=server_name
         )
+
+    def _parse_codex_tool_calls(
+        self,
+        content: str,
+        available_tools: list[dict[str, Any]] | None = None,
+    ) -> list[ToolCall]:
+        """Parse Codex-style <tool_calls> XML blocks."""
+        tool_calls = []
+        for tool_match in re.finditer(
+            r'<tool_call\s+name="([^"]+)"[^>]*>(.*?)</tool_call>',
+            content,
+            re.DOTALL,
+        ):
+            tool_name = tool_match.group(1).strip()
+            body = tool_match.group(2)
+            arguments: dict[str, Any] = {}
+            for param_match in re.finditer(
+                r'<parameter\s+name="([^"]+)"([^>]*)>(.*?)</parameter>',
+                body,
+                re.DOTALL,
+            ):
+                arguments[param_match.group(1)] = self._parse_codex_parameter(
+                    param_match.group(2),
+                    param_match.group(3),
+                )
+
+            resolved_name = self.resolver.resolve("tools", tool_name, available_tools)
+            if available_tools and not self._tool_exists(resolved_name, available_tools):
+                available_names = ", ".join(self._available_tool_names(available_tools))
+                raise ValidationError(
+                    f"Unknown tool '{tool_name}'. Available tools: {available_names}",
+                    context=content[:100],
+                )
+            tool_calls.append(
+                ToolCall(
+                    tool_name=resolved_name,
+                    arguments=arguments,
+                    server_name="tools",
+                )
+            )
+        return tool_calls
+
+    def _parse_codex_parameter(self, attributes: str, text: str) -> Any:
+        """Parse a Codex XML parameter value."""
+        value = text.strip()
+        string_match = re.search(r'\bstring="([^"]+)"', attributes)
+        is_string = not string_match or string_match.group(1).lower() != "false"
+        if is_string:
+            return value
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return value
+
+    def _available_tool_names(self, available_tools: list[dict[str, Any]]) -> list[str]:
+        names = []
+        for tool in available_tools:
+            if tool.get("type") == "function":
+                func = tool.get("function", {})
+                if name := func.get("name"):
+                    names.append(name)
+            elif name := tool.get("name"):
+                names.append(name)
+        return names
+
+    def _tool_exists(
+        self,
+        tool_name: str,
+        available_tools: list[dict[str, Any]],
+    ) -> bool:
+        return tool_name in self._available_tool_names(available_tools)
 
     def _parse_tool_call_json(self, content: str, available_tools: list[dict[str, Any]] | None = None) -> ToolCall | None:
         """Parse TOOL_CALL format with JSON content.
