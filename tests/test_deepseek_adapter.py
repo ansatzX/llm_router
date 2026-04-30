@@ -73,6 +73,46 @@ def test_deepseek_groups_parallel_response_function_calls():
     ]
 
 
+def test_deepseek_keeps_tool_outputs_adjacent_when_system_message_intervenes():
+    adapter = DeepSeekChatAdapter()
+
+    messages = adapter.flatten_response_items(
+        [
+            {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": '{"cmd":"curl"}',
+                "call_id": "call_1",
+                "reasoning_content": "fetch issues",
+            },
+            {
+                "type": "message",
+                "role": "developer",
+                "content": [
+                    {
+                        "type": "input_text",
+                        "text": "Approved command prefix saved.",
+                    }
+                ],
+            },
+            {
+                "type": "function_call_output",
+                "call_id": "call_1",
+                "output": "curl output",
+            },
+        ]
+    )
+
+    assert [message["role"] for message in messages] == [
+        "assistant",
+        "tool",
+        "system",
+    ]
+    assert messages[0]["tool_calls"][0]["id"] == "call_1"
+    assert messages[1]["tool_call_id"] == "call_1"
+    assert messages[2]["content"] == "Approved command prefix saved."
+
+
 def test_deepseek_wraps_responses_only_tools_as_chat_functions():
     adapter = DeepSeekChatAdapter()
 

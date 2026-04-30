@@ -194,14 +194,42 @@ class DeepSeekChatAdapter:
         result = []
         input_types: dict[str, int] = {}
         pending_tool_call_message: dict[str, Any] | None = None
+        pending_tool_call_emitted = False
+        pending_interleaved_messages: list[dict[str, Any]] = []
         pending_legacy_tool_calls: list[dict[str, Any]] = []
         pending_legacy_outputs: list[dict[str, Any]] = []
 
         def flush_pending_tool_calls() -> None:
-            nonlocal pending_tool_call_message
+            nonlocal pending_tool_call_message, pending_tool_call_emitted
+            nonlocal pending_interleaved_messages
             if pending_tool_call_message is not None:
-                result.append(pending_tool_call_message)
+                if not pending_tool_call_emitted:
+                    result.append(pending_tool_call_message)
+                if pending_interleaved_messages:
+                    result.extend(pending_interleaved_messages)
                 pending_tool_call_message = None
+                pending_tool_call_emitted = False
+                pending_interleaved_messages = []
+
+        def pending_tool_call_ids() -> set[str]:
+            if pending_tool_call_message is None:
+                return set()
+            return {
+                tool_call.get("id", "")
+                for tool_call in pending_tool_call_message.get("tool_calls", [])
+            }
+
+        def pending_tool_output_ids() -> set[str]:
+            if pending_tool_call_message is None:
+                return set()
+            pending_ids = pending_tool_call_ids()
+            output_ids = set()
+            for item in result:
+                if item.get("role") == "tool":
+                    tool_call_id = item.get("tool_call_id", "")
+                    if tool_call_id in pending_ids:
+                        output_ids.add(tool_call_id)
+            return output_ids
 
         def flush_legacy_tool_calls_without_outputs() -> None:
             nonlocal pending_legacy_tool_calls
@@ -269,6 +297,31 @@ class DeepSeekChatAdapter:
                 and converted.get("role") == "tool"
             ):
                 pending_legacy_outputs.append(converted)
+                continue
+
+            if (
+                pending_tool_call_message is not None
+                and isinstance(converted, dict)
+                and converted.get("role") == "tool"
+                and converted.get("tool_call_id") in pending_tool_call_ids()
+            ):
+                if not pending_tool_call_emitted:
+                    result.append(pending_tool_call_message)
+                    pending_tool_call_emitted = True
+                result.append(converted)
+                if pending_tool_output_ids() >= pending_tool_call_ids():
+                    if pending_interleaved_messages:
+                        result.extend(pending_interleaved_messages)
+                        pending_interleaved_messages = []
+                    pending_tool_call_message = None
+                    pending_tool_call_emitted = False
+                continue
+
+            if pending_tool_call_message is not None:
+                if isinstance(converted, list):
+                    pending_interleaved_messages.extend(converted)
+                else:
+                    pending_interleaved_messages.append(converted)
                 continue
 
             if pending_legacy_outputs:
