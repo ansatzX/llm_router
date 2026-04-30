@@ -310,6 +310,8 @@ def responses_api() -> tuple[Any, int]:
             )
             if chat_tools:
                 payload["tools"] = chat_tools
+        if is_deepseek:
+            payload = _deepseek_adapter.filter_request_payload(payload)
 
         # ── Run LLM ──
         llm_response, parse_result, retry_count, response_text = (

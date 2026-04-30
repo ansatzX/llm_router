@@ -3,6 +3,36 @@
 from llm_router.deepseek import DeepSeekChatAdapter
 
 
+def test_deepseek_filters_responses_metadata_from_chat_payload():
+    adapter = DeepSeekChatAdapter()
+
+    payload = {
+        "model": "deepseek-v4-pro",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": False,
+        "temperature": 0.7,
+        "repetition_penalty": 1.05,
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "high",
+        "reasoning": None,
+        "prompt_cache_key": "cache-key",
+        "client_metadata": {"x-codex-installation-id": "install-id"},
+        "text": {"format": {"type": "json_schema"}},
+    }
+
+    filtered = adapter.filter_request_payload(payload)
+
+    assert filtered == {
+        "model": "deepseek-v4-pro",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": False,
+        "temperature": 0.7,
+        "thinking": {"type": "enabled"},
+        "reasoning_effort": "high",
+    }
+    assert payload["client_metadata"] == {"x-codex-installation-id": "install-id"}
+
+
 def test_deepseek_groups_parallel_response_function_calls():
     adapter = DeepSeekChatAdapter()
 

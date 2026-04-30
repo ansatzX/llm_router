@@ -226,6 +226,50 @@ def test_responses_chat_route_forwards_codex_tools_as_chat_tools(tmp_path, monke
     assert payload["tool_choice"] == "auto"
 
 
+def test_responses_deepseek_route_filters_responses_metadata(
+    tmp_path,
+    monkeypatch,
+):
+    """DeepSeek adapter decides which Responses fields can reach Chat API."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": "hi",
+            "client_metadata": {"x-codex-installation-id": "install-id"},
+            "prompt_cache_key": "cache-key",
+            "text": {"format": {"type": "json_schema"}},
+            "reasoning": None,
+            "temperature": 0.7,
+            "repetition_penalty": 1.05,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = mock_make_request.call_args.args[0]
+    assert "client_metadata" not in payload
+    assert "prompt_cache_key" not in payload
+    assert "text" not in payload
+    assert "reasoning" not in payload
+    assert "repetition_penalty" not in payload
+    assert payload["temperature"] == 0.7
+
+
 def test_responses_chat_route_wraps_non_function_tools_for_chat_backend(
     tmp_path,
     monkeypatch,

@@ -17,6 +17,26 @@ from llm_router.debug_log import log_debug
 class DeepSeekChatAdapter:
     """Adapter for DeepSeek's OpenAI-compatible Chat API."""
 
+    CHAT_REQUEST_PARAMS = {
+        "model",
+        "messages",
+        "stream",
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "frequency_penalty",
+        "presence_penalty",
+        "response_format",
+        "stop",
+        "tools",
+        "tool_choice",
+        "parallel_tool_calls",
+        "logprobs",
+        "top_logprobs",
+        "thinking",
+        "reasoning_effort",
+    }
+
     def __init__(self) -> None:
         self.reasoning_by_call_id: dict[str, str] = {}
         self.reasoning_by_message_content: dict[str, str] = {}
@@ -24,6 +44,21 @@ class DeepSeekChatAdapter:
     def reset(self) -> None:
         self.reasoning_by_call_id.clear()
         self.reasoning_by_message_content.clear()
+
+    def filter_request_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        """Keep only request fields DeepSeek's Chat Completion API accepts."""
+        filtered = {
+            key: value
+            for key, value in payload.items()
+            if key in self.CHAT_REQUEST_PARAMS
+        }
+        dropped = sorted(set(payload) - set(filtered))
+        if dropped:
+            log_debug("DEEPSEEK_CHAT_PAYLOAD_FILTER", {
+                "dropped_keys": dropped,
+                "forwarded_keys": sorted(filtered),
+            })
+        return filtered
 
     def content_item_to_text(self, item: dict[str, Any]) -> str:
         """Extract text from a Responses API content item."""
