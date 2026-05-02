@@ -25,6 +25,18 @@ def _configure_test_app(tmp_path, monkeypatch, llm_response):
     return server_mod.app.test_client(), mock_make_request
 
 
+def _configure_passthrough_mock(monkeypatch, return_value=None, side_effect=None):
+    mock_make_responses_request = Mock(return_value=return_value)
+    if side_effect is not None:
+        mock_make_responses_request.side_effect = side_effect
+    monkeypatch.setattr(
+        server_mod,
+        "make_responses_request",
+        mock_make_responses_request,
+    )
+    return mock_make_responses_request
+
+
 def test_responses_previous_response_id_continues_same_session(tmp_path, monkeypatch):
     """The response ID returned by one turn links to the same session next turn."""
     client, mock_make_request = _configure_test_app(
@@ -270,6 +282,231 @@ def test_responses_deepseek_route_filters_responses_metadata(
     assert payload["temperature"] == 0.7
 
 
+def test_responses_deepseek_gateway_can_forward_prompt_cache_key(
+    tmp_path,
+    monkeypatch,
+):
+    """DeepSeek-compatible gateways may rely on OpenAI prompt-cache fields."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://zapi.aicc0.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": "hi",
+            "prompt_cache_key": "cache-key",
+            "prompt_cache_retention": {"type": "persistent"},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = mock_make_request.call_args.args[0]
+    assert payload["prompt_cache_key"] == "cache-key"
+    assert payload["prompt_cache_retention"] == {"type": "persistent"}
+
+
+def test_responses_non_official_deepseek_uses_native_responses_passthrough(
+    tmp_path,
+    monkeypatch,
+):
+    """Compatible DeepSeek gateways should preserve native Responses behavior."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    mock_make_responses_request = _configure_passthrough_mock(
+        monkeypatch,
+        return_value={
+            "id": "resp_passthrough",
+            "object": "response",
+            "created": 123,
+            "model": "accounts/demo/deployments/abc",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "ok"}],
+                }
+            ],
+            "output_text": "ok",
+            "usage": {
+                "input_tokens": 12,
+                "input_tokens_details": {"cached_tokens": 9},
+                "output_tokens": 3,
+                "output_tokens_details": {"reasoning_tokens": 1},
+                "total_tokens": 15,
+            },
+            "status": "completed",
+        },
+    )
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://zapi.aicc0.com",
+    )
+    server_mod._config.default_model_type = "responses"
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "deepseek-v4-pro",
+            "input": "hi",
+            "prompt_cache_key": "cache-key",
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    assert mock_make_request.call_count == 0
+    passthrough_payload = mock_make_responses_request.call_args.args[0]
+    assert passthrough_payload["model"] == "deepseek-v4-pro"
+    assert passthrough_payload["stream"] is False
+    assert passthrough_payload["prompt_cache_key"] == "cache-key"
+    assert b"response.completed" in response.data
+    assert b"cached_tokens" in response.data
+
+
+def test_responses_passthrough_forwards_previous_response_id(
+    tmp_path,
+    monkeypatch,
+):
+    """Native passthrough must preserve provider-managed response threading."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    mock_make_responses_request = _configure_passthrough_mock(
+        monkeypatch,
+        side_effect=[
+            {
+                "id": "resp_first",
+                "object": "response",
+                "created": 123,
+                "model": "accounts/demo/deployments/abc",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "first"}],
+                    }
+                ],
+                "output_text": "first",
+                "usage": {
+                    "input_tokens": 12,
+                    "input_tokens_details": {"cached_tokens": 0},
+                    "output_tokens": 3,
+                    "output_tokens_details": {"reasoning_tokens": 0},
+                    "total_tokens": 15,
+                },
+                "status": "completed",
+            },
+            {
+                "id": "resp_second",
+                "object": "response",
+                "created": 124,
+                "model": "accounts/demo/deployments/abc",
+                "output": [
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "second"}],
+                    }
+                ],
+                "output_text": "second",
+                "usage": {
+                    "input_tokens": 14,
+                    "input_tokens_details": {"cached_tokens": 9},
+                    "output_tokens": 4,
+                    "output_tokens_details": {"reasoning_tokens": 0},
+                    "total_tokens": 18,
+                },
+                "status": "completed",
+            },
+        ],
+    )
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://zapi.aicc0.com",
+    )
+    server_mod._config.default_model_type = "responses"
+    server_mod._config.default_upstream = "deepseek"
+
+    first = client.post(
+        "/v1/responses",
+        json={"model": "deepseek-v4-pro", "input": "first"},
+    )
+    second = client.post(
+        "/v1/responses",
+        json={
+            "model": "deepseek-v4-pro",
+            "previous_response_id": "resp_first",
+            "input": "second",
+        },
+    )
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert mock_make_request.call_count == 0
+    assert mock_make_responses_request.call_count == 2
+    second_payload = mock_make_responses_request.call_args_list[1].args[0]
+    assert second_payload["previous_response_id"] == "resp_first"
+    assert second.get_json()["usage"]["input_tokens_details"]["cached_tokens"] == 9
+
+
+def test_responses_passthrough_falls_back_to_chat_emulation_when_unsupported(
+    tmp_path,
+    monkeypatch,
+):
+    """Non-compatible gateways should transparently fall back to local emulation."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    _configure_passthrough_mock(
+        monkeypatch,
+        side_effect=server_mod.ResponsesPassthroughUnsupportedError("unsupported"),
+    )
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://zapi.aicc0.com",
+    )
+    server_mod._config.default_model_type = "responses"
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "deepseek-v4-pro", "input": "hi"},
+    )
+
+    assert response.status_code == 200
+    assert mock_make_request.call_count == 1
+
+
 def test_responses_default_chat_provider_filters_metadata_and_maps_text_format(
     tmp_path,
     monkeypatch,
@@ -390,6 +627,78 @@ def test_responses_can_rewrite_requested_model_to_provider_model(
     payload = mock_make_request.call_args.args[0]
     assert payload["model"] == "deepseek-v4-flash"
     assert response.get_json()["model"] == "gpt-5.4-mini"
+
+
+def test_responses_usage_maps_cached_and_reasoning_tokens_to_responses_shape(
+    tmp_path,
+    monkeypatch,
+):
+    """Codex expects nested Responses usage details for cache and reasoning."""
+    client, _ = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "total_tokens": 18,
+                "prompt_tokens_details": {"cached_tokens": 5},
+                "reasoning_tokens": 3,
+            },
+        },
+    )
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "test-model", "input": "hi"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["usage"] == {
+        "input_tokens": 11,
+        "input_tokens_details": {"cached_tokens": 5},
+        "output_tokens": 7,
+        "output_tokens_details": {"reasoning_tokens": 3},
+        "total_tokens": 18,
+    }
+
+
+def test_responses_usage_maps_deepseek_cache_hit_tokens_to_responses_shape(
+    tmp_path,
+    monkeypatch,
+):
+    """DeepSeek cache-hit counters should surface as cached input tokens."""
+    client, _ = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 13,
+                "completion_tokens": 2,
+                "total_tokens": 15,
+                "prompt_cache_hit_tokens": 8,
+                "reasoning_output_tokens": 1,
+            },
+        },
+    )
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "test-model", "input": "hi"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["usage"] == {
+        "input_tokens": 13,
+        "input_tokens_details": {"cached_tokens": 8},
+        "output_tokens": 2,
+        "output_tokens_details": {"reasoning_tokens": 1},
+        "total_tokens": 15,
+    }
 
 
 def test_responses_memory_phase_one_request_rewrites_only_fixed_small_model(

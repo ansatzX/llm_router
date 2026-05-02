@@ -14,6 +14,7 @@ import re
 import time
 import uuid
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from flask import Flask, Response, jsonify, request, stream_with_context
@@ -22,10 +23,12 @@ from llm_router.config import RouterConfig
 from llm_router.debug_log import log_debug
 from llm_router.deepseek import DeepSeekChatAdapter
 from llm_router.llm_client import (
+    ResponsesPassthroughUnsupportedError,
     _get_env_float,
     check_backend_health,
     list_models,
     make_llm_request,
+    make_responses_request,
 )
 from llm_router.mirothinker import MiroThinkerMCPAdapter
 from llm_router.openai_chat import OpenAIChatAdapter
@@ -154,10 +157,115 @@ def _is_deepseek_upstream(upstream_name: str, base_url: str) -> bool:
     return upstream_name == "deepseek" or "api.deepseek.com" in base_url
 
 
+def _is_official_deepseek_base_url(base_url: str) -> bool:
+    host = urlparse(base_url.rstrip("/")).netloc.lower()
+    return host == "api.deepseek.com"
+
+
+def _has_local_responses_session(previous_response_id: str | None) -> bool:
+    if not previous_response_id or _sessions is None:
+        return False
+    return _sessions.get(previous_response_id) is not None
+
+
 def _chat_adapter_for(upstream_name: str, base_url: str) -> DeepSeekChatAdapter:
     if _is_deepseek_upstream(upstream_name, base_url):
-        return DeepSeekChatAdapter()
+        return DeepSeekChatAdapter(
+            forward_compat_prompt_cache=not _is_official_deepseek_base_url(
+                base_url,
+            ),
+        )
     return OpenAIChatAdapter()
+
+
+def _should_try_responses_passthrough(
+    model_type: str,
+    upstream_name: str,
+    base_url: str,
+    previous_response_id: str | None,
+) -> bool:
+    if model_type != "responses":
+        return False
+    if _has_local_responses_session(previous_response_id):
+        return False
+    if not _is_deepseek_upstream(upstream_name, base_url):
+        return False
+    return not _is_official_deepseek_base_url(base_url)
+
+
+def _passthrough_response_to_client_payload(
+    passthrough_response: dict[str, Any],
+    requested_model: str,
+) -> dict[str, Any]:
+    response = dict(passthrough_response)
+    response["model"] = requested_model
+    return response
+
+
+def _int_or_zero(value: Any) -> int:
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    return 0
+
+
+def _extract_cached_input_tokens(raw_usage: dict[str, Any]) -> int:
+    for details_key in ("input_tokens_details", "prompt_tokens_details"):
+        details = raw_usage.get(details_key)
+        if isinstance(details, dict):
+            cached_tokens = details.get("cached_tokens")
+            if cached_tokens is not None:
+                return _int_or_zero(cached_tokens)
+
+    for usage_key in (
+        "prompt_cache_hit_tokens",
+        "cached_input_tokens",
+    ):
+        cached_tokens = raw_usage.get(usage_key)
+        if cached_tokens is not None:
+            return _int_or_zero(cached_tokens)
+
+    return 0
+
+
+def _extract_reasoning_tokens(raw_usage: dict[str, Any]) -> int:
+    details = raw_usage.get("output_tokens_details")
+    if isinstance(details, dict):
+        reasoning_tokens = details.get("reasoning_tokens")
+        if reasoning_tokens is not None:
+            return _int_or_zero(reasoning_tokens)
+
+    for usage_key in ("reasoning_tokens", "reasoning_output_tokens"):
+        reasoning_tokens = raw_usage.get(usage_key)
+        if reasoning_tokens is not None:
+            return _int_or_zero(reasoning_tokens)
+
+    return 0
+
+
+def _responses_usage_from_provider(raw_usage: dict[str, Any]) -> dict[str, Any]:
+    input_tokens = _int_or_zero(
+        raw_usage.get("input_tokens", raw_usage.get("prompt_tokens", 0)),
+    )
+    output_tokens = _int_or_zero(
+        raw_usage.get("output_tokens", raw_usage.get("completion_tokens", 0)),
+    )
+    total_tokens = _int_or_zero(
+        raw_usage.get("total_tokens", input_tokens + output_tokens),
+    )
+    cached_tokens = _extract_cached_input_tokens(raw_usage)
+    reasoning_tokens = _extract_reasoning_tokens(raw_usage)
+
+    return {
+        "input_tokens": input_tokens,
+        "input_tokens_details": {"cached_tokens": cached_tokens},
+        "output_tokens": output_tokens,
+        "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
+        "total_tokens": total_tokens,
+    }
 
 
 def _extract_mode_markers(content: str) -> list[str]:
@@ -448,7 +556,7 @@ def convert_responses_tool_to_chat(tool: dict[str, Any]) -> dict[str, Any]:
 def _build_sse_response(
     response_id: str,
     output_items: list[dict[str, Any]],
-    usage: dict[str, int],
+    usage: dict[str, Any],
 ) -> Response:
     """Build SSE streaming response in Responses API format."""
     return Response(
@@ -559,6 +667,53 @@ def responses_api() -> tuple[Any, int]:
         instructions = data.get("instructions", "")
         tools_raw = data.get("tools", [])
         client_requested_stream = data.get("stream", False)
+        previous_response_id = data.get("previous_response_id")
+
+        model_type, upstream_name, base_url, api_key, upstream_model = _resolve(
+            model,
+            data,
+            None,
+        )
+        if _should_try_responses_passthrough(
+            model_type,
+            upstream_name,
+            base_url,
+            previous_response_id,
+        ):
+            passthrough_payload = dict(data)
+            passthrough_payload["model"] = upstream_model
+            passthrough_payload["stream"] = False
+            try:
+                passthrough_response = make_responses_request(
+                    passthrough_payload,
+                    base_url,
+                    api_key,
+                )
+                passthrough_usage = passthrough_response.get("usage", {})
+                response = _passthrough_response_to_client_payload(
+                    passthrough_response,
+                    model,
+                )
+                log_debug("CLIENT_RESPONSE /v1/responses", {
+                    "status": "passthrough_success",
+                    "model": model,
+                    "model_type": model_type,
+                    "upstream": upstream_name,
+                    "usage": passthrough_usage,
+                })
+                if client_requested_stream:
+                    return _build_sse_response(
+                        response["id"],
+                        response.get("output", []),
+                        passthrough_usage,
+                    )
+                return jsonify(response), 200
+            except ResponsesPassthroughUnsupportedError as exc:
+                log_debug("RESPONSES_PASSTHROUGH_FALLBACK", {
+                    "model": model,
+                    "upstream": upstream_name,
+                    "reason": str(exc),
+                })
 
         # Convert tools to Chat format for internal use
         tools = [convert_chat_tool_to_responses(t) for t in tools_raw]
@@ -631,11 +786,7 @@ def responses_api() -> tuple[Any, int]:
 
         # Convert usage
         raw_usage = llm_response.get("usage", {})
-        usage = {
-            "input_tokens": raw_usage.get("prompt_tokens", 0),
-            "output_tokens": raw_usage.get("completion_tokens", 0),
-            "total_tokens": raw_usage.get("total_tokens", 0),
-        }
+        usage = _responses_usage_from_provider(raw_usage)
 
         # Extract tool calls
         tool_calls_list = []
@@ -670,11 +821,7 @@ def responses_api() -> tuple[Any, int]:
                 )
             )
             raw_usage = llm_response.get("usage", {})
-            usage = {
-                "input_tokens": raw_usage.get("prompt_tokens", 0),
-                "output_tokens": raw_usage.get("completion_tokens", 0),
-                "total_tokens": raw_usage.get("total_tokens", 0),
-            }
+            usage = _responses_usage_from_provider(raw_usage)
             tool_calls_list = native_tool_calls or []
 
         _validate_plan_mode_output_items(collaboration_mode, output_items)
@@ -700,11 +847,7 @@ def responses_api() -> tuple[Any, int]:
                 )
             )
             raw_usage = llm_response.get("usage", {})
-            usage = {
-                "input_tokens": raw_usage.get("prompt_tokens", 0),
-                "output_tokens": raw_usage.get("completion_tokens", 0),
-                "total_tokens": raw_usage.get("total_tokens", 0),
-            }
+            usage = _responses_usage_from_provider(raw_usage)
             tool_calls_list = native_tool_calls or []
             _validate_plan_mode_output_items(collaboration_mode, output_items)
 
