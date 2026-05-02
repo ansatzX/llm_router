@@ -143,6 +143,9 @@ old incompatible tool-call history.
 
 ## Development
 
+Developer and agent-facing guidance is provided in [`AGENTS.md`](AGENTS.md) and
+[`CLAUDE.md`](CLAUDE.md).
+
 Run tests:
 
 ```bash

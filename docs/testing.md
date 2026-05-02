@@ -1,0 +1,90 @@
+# Testing Guide
+
+## Current Test Role
+
+The test suite protects real router behavior:
+
+- Responses session continuation
+- pending tool-call validation
+- provider payload filtering
+- DeepSeek reasoning replay state
+- MiroThinker MCP parsing and retry behavior
+- model routing and upstream model rewrites
+- Plan-mode compatibility recovery
+- debug JSONL logging
+
+Prefer regression tests that describe observed failures or protocol boundaries.
+Avoid tests that only lock in incidental helper structure.
+
+## Main Test Files
+
+- `tests/test_server_responses.py`: primary `/v1/responses` integration
+  regressions.
+- `tests/test_deepseek_adapter.py`: DeepSeek request/response adapter behavior.
+- `tests/test_mirothinker_adapter.py`: MiroThinker MCP-first behavior.
+- `tests/test_config.py`: routing and upstream model rewrite behavior.
+- `tests/test_session_store.py`: persisted session behavior.
+- `tests/test_thread_safety.py`: initialization and threading assumptions.
+- `tests/live/test_codex_cli_e2e.py`: opt-in real Codex CLI smoke test.
+
+Parser tests remain useful for the MiroThinker MCP path, but provider or
+Responses bugs should usually be tested at adapter or server level.
+
+## Commands
+
+Run normal checks:
+
+```bash
+uv run python -m pytest -q
+uv run ruff check .
+```
+
+Run focused files:
+
+```bash
+uv run python -m pytest tests/test_server_responses.py -q
+uv run python -m pytest tests/test_deepseek_adapter.py -q
+```
+
+Run live Codex e2e only when explicitly needed:
+
+```bash
+LLM_ROUTER_LIVE_CODEX_E2E=1 uv run python -m pytest tests/live -q
+```
+
+Live tests start a temporary router, call the real `codex` CLI, and consume
+upstream provider quota. They must stay opt-in.
+
+## Test Expectations For Provider Work
+
+Provider changes should include tests for:
+
+- unsupported request fields being filtered
+- provider-specific fields being mapped only for that provider
+- Codex tools surviving provider conversion
+- provider response items becoming correct Responses output items
+- provider-private state being persisted only after success
+- upstream failure not mutating session state
+
+If adding streaming, include event-order tests before live tests:
+
+- `response.output_item.added` before `response.output_text.delta`
+- accumulated final item equals non-streaming final item
+- failed or truncated stream does not commit partial state
+
+## Meaningful Failure Evidence
+
+When fixing a real bug, preserve the failure shape in the test name or payload.
+
+Good examples:
+
+- unknown tool output rejected before upstream
+- DeepSeek `client_metadata` filtered before Chat request
+- memory model override applies only to memory workloads
+- Plan-mode plain-text question retried as `request_user_input`
+
+Weak examples:
+
+- testing that a helper returns a dict without checking behavior
+- asserting exact internal ordering where the protocol does not require it
+- adding a snapshot that hides the real compatibility rule
