@@ -43,7 +43,7 @@ def cmd_serve(args):
 
     if args.debug:
         set_debug_mode(True)
-        print("[DEBUG] Debug mode enabled, logging to llm_router.log")
+        print("[DEBUG] Debug mode enabled, logging to llm_router.jsonl")
 
     print(f"LLM Router starting on {cfg.server_host}:{cfg.server_port}")
     print(f"  Upstreams: {list(cfg.upstreams.keys())}")

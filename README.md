@@ -1,10 +1,9 @@
 # LLM Router
 
-`llm-router` is a local router for using non-OpenAI models from Codex. The
-current target is Codex's Responses-style traffic, with provider-specific
-adapters for:
+`llm-router` is a local router for adapting Codex traffic to non-OpenAI model
+providers. The project is currently centered on two paths:
 
-- DeepSeek official API through its OpenAI-compatible Chat API.
+- DeepSeek official API through its Chat-compatible API surface.
 - MiroThinker models that prefer MCP/XML tool calls.
 
 Codex still executes local tools. The router only adapts requests and responses
@@ -18,8 +17,6 @@ The default route config is in [`router.toml`](router.toml).
 | --- | --- | --- | --- |
 | `deepseek-*` | `chat` | `deepseek` | Main supported route. Codex tools are forwarded as Chat `function` tools. |
 | `mirothinker-*` | `mcp_first` | `mirothinker` | MCP-first route. Native tools are converted to an MCP XML prompt. |
-| `gpt-*` | `responses` | `default` | Fallback/default upstream route. Not the focus of this project. |
-| `claude-*` | `responses` | `default` | Fallback/default upstream route. Not the focus of this project. |
 
 ## Install
 
@@ -57,11 +54,7 @@ The intended Codex usage is:
 
 | Command | Provider | Model catalog | Default model |
 | --- | --- | --- | --- |
-| `codex` | OpenAI default | Remote OpenAI catalog | `gpt-5.5` |
 | `codex -p llm_router` | Local `llm_router` provider | `~/.codex/llm_router.json` | `deepseek-v4-pro` |
-
-This keeps normal `codex` on OpenAI while `codex -p llm_router` opts into the
-local router and static model catalog.
 
 `env_key` in the Codex example is only a Codex-side placeholder for now. Real
 upstream keys are read by `llm-router` according to [`router.toml`](router.toml),
@@ -81,7 +74,7 @@ With debug logs:
 uv run llm-router serve --debug
 ```
 
-Debug logs are written to `llm_router.log`.
+Debug logs are written to `llm_router.jsonl` as JSONL.
 
 Launch Codex through the router profile:
 
@@ -114,7 +107,7 @@ The adapter currently handles:
 
 - MCP XML prompt injection from the Codex tool list.
 - Parsing `<use_mcp_tool>` output from content or reasoning text.
-- Returning parsed MCP calls as Codex/OpenAI tool calls.
+- Returning parsed MCP calls as Codex tool calls.
 - Retry feedback when emitted MCP XML is incomplete.
 
 Only MiroThinker is intended to be MCP-first.

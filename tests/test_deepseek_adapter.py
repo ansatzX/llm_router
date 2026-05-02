@@ -33,6 +33,27 @@ def test_deepseek_filters_responses_metadata_from_chat_payload():
     assert payload["client_metadata"] == {"x-codex-installation-id": "install-id"}
 
 
+def test_deepseek_maps_responses_reasoning_effort_and_drops_service_tier():
+    adapter = DeepSeekChatAdapter()
+
+    payload = {
+        "model": "deepseek-v4-pro",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": False,
+        "reasoning": {"effort": "medium", "summary": "detailed"},
+        "service_tier": "priority",
+    }
+
+    filtered = adapter.filter_request_payload(payload)
+
+    assert filtered == {
+        "model": "deepseek-v4-pro",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": False,
+        "reasoning_effort": "medium",
+    }
+
+
 def test_deepseek_groups_parallel_response_function_calls():
     adapter = DeepSeekChatAdapter()
 
@@ -155,6 +176,46 @@ def test_deepseek_round_trips_reasoning_from_cache():
 
     assert messages[0]["reasoning_content"] == "message reasoning"
     assert messages[1]["reasoning_content"] == "tool reasoning"
+
+
+def test_deepseek_hydrates_reasoning_cache_from_provider_state():
+    adapter = DeepSeekChatAdapter()
+    adapter.load_provider_state(
+        {
+            "reasoning_by_call_id": {"call_1": "persisted tool reasoning"},
+            "reasoning_by_message_content": {"hello": "persisted message reasoning"},
+        }
+    )
+
+    messages = adapter.flatten_response_items(
+        [
+            {
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "hello"}],
+            },
+            {
+                "type": "function_call",
+                "name": "exec_command",
+                "arguments": '{"cmd":"ls"}',
+                "call_id": "call_1",
+            },
+        ]
+    )
+
+    assert messages[0]["reasoning_content"] == "persisted message reasoning"
+    assert messages[1]["reasoning_content"] == "persisted tool reasoning"
+
+
+def test_deepseek_exports_reasoning_cache_as_provider_state():
+    adapter = DeepSeekChatAdapter()
+    adapter.record_message_reasoning("done", "message reasoning")
+    adapter.record_tool_reasoning("call_1", "tool reasoning")
+
+    assert adapter.dump_provider_state() == {
+        "reasoning_by_call_id": {"call_1": "tool reasoning"},
+        "reasoning_by_message_content": {"done": "message reasoning"},
+    }
 
 
 def test_deepseek_downgrades_uncached_tool_turns_without_reasoning():

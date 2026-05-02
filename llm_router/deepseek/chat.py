@@ -45,13 +45,48 @@ class DeepSeekChatAdapter:
         self.reasoning_by_call_id.clear()
         self.reasoning_by_message_content.clear()
 
+    def load_provider_state(self, provider_state: dict[str, Any] | None) -> None:
+        """Load persisted DeepSeek-private state for one Responses session."""
+        self.reset()
+        if not isinstance(provider_state, dict):
+            return
+        reasoning_by_call_id = provider_state.get("reasoning_by_call_id", {})
+        reasoning_by_message_content = provider_state.get(
+            "reasoning_by_message_content",
+            {},
+        )
+        if isinstance(reasoning_by_call_id, dict):
+            self.reasoning_by_call_id.update({
+                str(key): str(value)
+                for key, value in reasoning_by_call_id.items()
+                if value
+            })
+        if isinstance(reasoning_by_message_content, dict):
+            self.reasoning_by_message_content.update({
+                str(key): str(value)
+                for key, value in reasoning_by_message_content.items()
+                if value
+            })
+
+    def dump_provider_state(self) -> dict[str, dict[str, str]]:
+        """Return DeepSeek-private state suitable for session persistence."""
+        return {
+            "reasoning_by_call_id": dict(self.reasoning_by_call_id),
+            "reasoning_by_message_content": dict(
+                self.reasoning_by_message_content,
+            ),
+        }
+
     def filter_request_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Keep only request fields DeepSeek's Chat Completion API accepts."""
+        reasoning_effort = self._reasoning_effort_from_payload(payload)
         filtered = {
             key: value
             for key, value in payload.items()
             if key in self.CHAT_REQUEST_PARAMS
         }
+        if reasoning_effort and "reasoning_effort" not in filtered:
+            filtered["reasoning_effort"] = reasoning_effort
         dropped = sorted(set(payload) - set(filtered))
         if dropped:
             log_debug("DEEPSEEK_CHAT_PAYLOAD_FILTER", {
@@ -59,6 +94,22 @@ class DeepSeekChatAdapter:
                 "forwarded_keys": sorted(filtered),
             })
         return filtered
+
+    def _reasoning_effort_from_payload(
+        self,
+        payload: dict[str, Any],
+    ) -> str | None:
+        """Extract chat-compatible reasoning effort from a Responses payload."""
+        reasoning_effort = payload.get("reasoning_effort")
+        if isinstance(reasoning_effort, str) and reasoning_effort:
+            return reasoning_effort
+
+        reasoning = payload.get("reasoning")
+        if isinstance(reasoning, dict):
+            effort = reasoning.get("effort")
+            if isinstance(effort, str) and effort:
+                return effort
+        return None
 
     def content_item_to_text(self, item: dict[str, Any]) -> str:
         """Extract text from a Responses API content item."""

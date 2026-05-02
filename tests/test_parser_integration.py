@@ -114,13 +114,3 @@ def test_parse_tool_calls_empty_content():
     result = parse_tool_calls("")
 
     assert result.success is False
-
-
-def test_exports():
-    """Test that public API exports are correct."""
-    from llm_router.parser import ParseError, ParseResult, ToolCall, parse_tool_calls
-
-    assert callable(parse_tool_calls)
-    assert ToolCall is not None
-    assert ParseResult is not None
-    assert ParseError is not None

@@ -34,6 +34,7 @@ class RouteConfig:
     pattern: str
     model_type: str = "chat"  # "chat" | "mcp_first" | "responses"
     upstream: str = "default"
+    upstream_model: str = ""
 
     def matches(self, model: str) -> bool:
         return fnmatch(model, self.pattern)
@@ -45,6 +46,7 @@ class RouterConfig:
     server_port: int = 9876
     default_model_type: str = "responses"
     default_upstream: str = "default"
+    default_upstream_model: str = ""
     session_ttl_seconds: int = 3600
     max_rollback_retries: int = 3
     mcp_server_name: str = "tools"
@@ -85,12 +87,17 @@ class RouterConfig:
                 pattern=r_data["pattern"],
                 model_type=r_data.get("type", "chat"),
                 upstream=r_data.get("upstream", "default"),
+                upstream_model=r_data.get("upstream_model", ""),
             ))
 
         # [default_route]
         default = data.get("default_route", {})
         cfg.default_model_type = default.get("type", cfg.default_model_type)
         cfg.default_upstream = default.get("upstream", cfg.default_upstream)
+        cfg.default_upstream_model = default.get(
+            "upstream_model",
+            cfg.default_upstream_model,
+        )
 
         cfg._validate()
         return cfg
@@ -110,12 +117,21 @@ class RouterConfig:
 
     def resolve(self, model: str) -> tuple[str, UpstreamConfig]:
         """Resolve a model name to (model_type, upstream)."""
+        model_type, upstream, _ = self.resolve_request(model)
+        return model_type, upstream
+
+    def resolve_request(self, model: str) -> tuple[str, UpstreamConfig, str]:
+        """Resolve a model name to routing info including upstream model slug."""
         for route in self.routes:
             if route.matches(model):
                 upstream = self.upstreams[route.upstream]
-                return route.model_type, upstream
+                return (
+                    route.model_type,
+                    upstream,
+                    route.upstream_model or model,
+                )
         upstream = self.upstreams[self.default_upstream]
-        return self.default_model_type, upstream
+        return self.default_model_type, upstream, self.default_upstream_model or model
 
     @classmethod
     def load_or_find(cls, config_path: str | None = None) -> RouterConfig:

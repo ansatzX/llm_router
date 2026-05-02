@@ -99,16 +99,16 @@ OPENAI_PARAMS: set[str] = {
     "temperature", "top_p", "n", "stream", "stop", "max_tokens",
     "max_completion_tokens", "presence_penalty", "frequency_penalty",
     "logit_bias", "user", "response_format", "seed", "tools", "tool_choice",
-    "parallel_tool_calls", "logprobs", "top_logprobs",
+    "parallel_tool_calls", "logprobs", "top_logprobs", "reasoning_effort",
+    "service_tier",
 }
 
 
-# Default parameter values - MiroThinker recommendations for optimal tool-calling performance
+# Default parameter values applied to every backend request.
 DEFAULT_PARAMS: dict[str, float | int] = {
     "temperature": _get_env_float("DEFAULT_TEMPERATURE", 1.0),
     "top_p": _get_env_float("DEFAULT_TOP_P", 0.95),
     "max_tokens": _get_env_int("DEFAULT_MAX_TOKENS", 16384),
-    "repetition_penalty": _get_env_float("DEFAULT_REPETITION_PENALTY", 1.05),
 }
 
 

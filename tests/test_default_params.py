@@ -27,7 +27,7 @@ def test_default_params_applied_when_missing(mock_llm_response):
         assert call_kwargs["temperature"] == DEFAULT_PARAMS["temperature"]
         assert call_kwargs["top_p"] == DEFAULT_PARAMS["top_p"]
         assert call_kwargs["max_tokens"] == DEFAULT_PARAMS["max_tokens"]
-        assert call_kwargs["extra_body"]["repetition_penalty"] == DEFAULT_PARAMS["repetition_penalty"]
+        assert "extra_body" not in call_kwargs
 
 
 def test_client_params_override_defaults(mock_llm_response):
@@ -80,7 +80,32 @@ def test_partial_client_params_use_defaults(mock_llm_response):
         assert call_kwargs["temperature"] == 0.7  # Client value
         assert call_kwargs["top_p"] == DEFAULT_PARAMS["top_p"]  # Default
         assert call_kwargs["max_tokens"] == DEFAULT_PARAMS["max_tokens"]  # Default
-        assert call_kwargs["extra_body"]["repetition_penalty"] == DEFAULT_PARAMS["repetition_penalty"]  # Default
+        assert "extra_body" not in call_kwargs
+
+
+def test_reasoning_effort_and_service_tier_are_sent_as_standard_chat_params(
+    mock_llm_response,
+):
+    """Fast/plan controls should not be demoted into extra_body."""
+    with patch('llm_router.llm_client._get_client') as mock_get_client:
+        mock_client = Mock()
+        mock_client.chat.completions.create.return_value = mock_llm_response
+        mock_get_client.return_value = mock_client
+
+        payload = {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+            "reasoning_effort": "medium",
+            "service_tier": "priority",
+        }
+
+        make_llm_request(payload, "http://localhost:8000", None)
+
+        call_kwargs = mock_client.chat.completions.create.call_args[1]
+
+        assert call_kwargs["reasoning_effort"] == "medium"
+        assert call_kwargs["service_tier"] == "priority"
+        assert "extra_body" not in call_kwargs
 
 
 def test_env_vars_with_invalid_values():

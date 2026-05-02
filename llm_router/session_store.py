@@ -25,6 +25,8 @@ class ResponsesSession:
         self.response_id = response_id
         self.model = model
         self.items: list[dict[str, Any]] = []
+        self.pending_tool_calls: dict[str, dict[str, Any]] = {}
+        self.provider_state: dict[str, Any] = {}
         self.created_at = time.time()
         self.last_access = time.time()
 
@@ -35,6 +37,35 @@ class ResponsesSession:
     def add_output_item(self, item: dict[str, Any]):
         self.items.append(item)
         self.last_access = time.time()
+
+    def register_tool_call(
+        self,
+        item: dict[str, Any],
+        response_id: str,
+    ) -> None:
+        call_id = item.get("call_id") or item.get("id")
+        if not call_id:
+            return
+        self.pending_tool_calls[call_id] = {
+            "call_id": call_id,
+            "name": item.get("name", ""),
+            "type": item.get("type", ""),
+            "arguments": item.get("arguments", item.get("input", "")),
+            "created_response_id": response_id,
+            "status": "pending",
+        }
+        self.last_access = time.time()
+
+    def satisfy_tool_call(self, call_id: str) -> None:
+        if call_id in self.pending_tool_calls:
+            self.pending_tool_calls[call_id]["status"] = "satisfied"
+            self.last_access = time.time()
+
+    def unresolved_tool_call_ids(self) -> set[str]:
+        return {
+            call_id for call_id, state in self.pending_tool_calls.items()
+            if state.get("status") == "pending"
+        }
 
     def item_count(self) -> int:
         return len(self.items)
@@ -48,6 +79,8 @@ class ResponsesSession:
             "response_id": self.response_id,
             "model": self.model,
             "items": self.items,
+            "pending_tool_calls": self.pending_tool_calls,
+            "provider_state": self.provider_state,
             "created_at": self.created_at,
             "last_access": self.last_access,
         }
@@ -56,6 +89,8 @@ class ResponsesSession:
     def from_dict(cls, d: dict[str, Any]) -> ResponsesSession:
         s = cls(d["response_id"], d.get("model", "unknown"))
         s.items = d.get("items", [])
+        s.pending_tool_calls = d.get("pending_tool_calls", {})
+        s.provider_state = d.get("provider_state", {})
         s.created_at = d.get("created_at", time.time())
         s.last_access = d.get("last_access", time.time())
         return s
@@ -183,6 +218,10 @@ class SessionStore:
     ) -> None:
         """Append assistant output and persist the updated session."""
         session.add_output_item(item)
+        self._save()
+
+    def save(self) -> None:
+        """Persist the current in-memory sessions."""
         self._save()
 
     def register_response_id(

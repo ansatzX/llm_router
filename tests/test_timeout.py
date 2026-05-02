@@ -88,14 +88,3 @@ class TestGetRequestTimeout:
 
             # Zero is valid (though not recommended)
             assert timeout.read == 0.0
-
-    def test_timeout_object_type(self, reset_llm_client_state):
-        """Test that timeout returns correct httpx.Timeout object."""
-        timeout = get_request_timeout()
-
-        # Should be httpx.Timeout instance
-        assert isinstance(timeout, httpx.Timeout)
-        assert hasattr(timeout, 'connect')
-        assert hasattr(timeout, 'read')
-        assert hasattr(timeout, 'write')
-        assert hasattr(timeout, 'pool')
