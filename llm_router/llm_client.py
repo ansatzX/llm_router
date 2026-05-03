@@ -122,6 +122,19 @@ _CLIENT_CACHE: dict[tuple[str, str], OpenAI] = {}
 _CLIENT_CACHE_LOCK = threading.Lock()
 
 
+class ResponsesPassthroughUnsupportedError(Exception):
+    """Raised when an upstream does not support native /v1/responses passthrough."""
+
+
+def _normalize_base_url(llm_base_url: str) -> str:
+    """Normalize an upstream base URL, appending /v1 for host-only URLs."""
+    base_url = llm_base_url.rstrip("/")
+    parsed = urlparse(base_url)
+    if not parsed.path or parsed.path == "/":
+        return f"{base_url}/v1"
+    return base_url
+
+
 def _get_client(llm_base_url: str, api_key: str | None) -> OpenAI:
     """Get or create cached OpenAI client instance.
 
@@ -145,12 +158,7 @@ def _get_client(llm_base_url: str, api_key: str | None) -> OpenAI:
             # Check again inside lock
             if cache_key not in _CLIENT_CACHE:
                 # Normalize base_url only on cache miss
-                base_url = llm_base_url.rstrip("/")
-                parsed = urlparse(base_url)
-
-                # Only append /v1 if path is empty
-                if not parsed.path or parsed.path == "/":
-                    base_url = f"{base_url}/v1"
+                base_url = _normalize_base_url(llm_base_url)
 
                 _CLIENT_CACHE[cache_key] = OpenAI(
                     base_url=base_url,
@@ -223,6 +231,74 @@ def make_llm_request(payload: dict[str, Any], llm_base_url: str, api_key: str | 
         return result
     except Exception as e:
         raise Exception(f"LLM request error: {e}") from e
+
+
+def make_responses_request(
+    payload: dict[str, Any],
+    llm_base_url: str,
+    api_key: str | None = None,
+) -> dict[str, Any]:
+    """Make a direct OpenAI Responses API request to a compatible upstream."""
+    url = f"{_normalize_base_url(llm_base_url)}/responses"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    log_debug("RESPONSES_PASSTHROUGH_REQUEST", {
+        "url": url,
+        "payload_keys": sorted(payload),
+        "model": payload.get("model"),
+        "stream": payload.get("stream"),
+        "previous_response_id": payload.get("previous_response_id"),
+        "tool_count": len(payload.get("tools", []) or []),
+    })
+
+    with httpx.Client(timeout=get_request_timeout()) as client:
+        response = client.post(url, headers=headers, json=payload)
+
+    content_type = response.headers.get("content-type", "").lower()
+    if response.status_code in {404, 405, 415, 501}:
+        raise ResponsesPassthroughUnsupportedError(
+            f"Responses endpoint unsupported: HTTP {response.status_code}",
+        )
+    if "text/html" in content_type:
+        raise ResponsesPassthroughUnsupportedError(
+            "Responses endpoint returned HTML instead of JSON",
+        )
+
+    try:
+        result = response.json()
+    except ValueError as exc:
+        raise ResponsesPassthroughUnsupportedError(
+            "Responses endpoint returned non-JSON content",
+        ) from exc
+
+    if response.status_code >= 400:
+        error = result.get("error")
+        if isinstance(error, dict):
+            message = str(error.get("message", ""))
+            error_type = str(error.get("type", ""))
+            unsupported_markers = (
+                "not found",
+                "unsupported",
+                "not supported",
+                "unknown endpoint",
+            )
+            if any(marker in message.lower() for marker in unsupported_markers):
+                raise ResponsesPassthroughUnsupportedError(message)
+            if any(marker in error_type.lower() for marker in unsupported_markers):
+                raise ResponsesPassthroughUnsupportedError(error_type)
+        raise Exception(
+            f"Responses request error: HTTP {response.status_code} {result}",
+        )
+
+    if not isinstance(result, dict) or result.get("object") != "response":
+        raise ResponsesPassthroughUnsupportedError(
+            "Responses endpoint returned an unexpected payload shape",
+        )
+
+    log_debug("RESPONSES_PASSTHROUGH_RESPONSE", result)
+    return result
 
 
 def list_models(llm_base_url: str, api_key: str | None = None) -> dict[str, Any]:
