@@ -23,8 +23,7 @@ from llm_router.config import RouterConfig
 from llm_router.debug_log import log_debug
 from llm_router.deepseek import DeepSeekChatAdapter
 from llm_router.llm_client import (
-    ResponsesPassthroughTransientError,
-    ResponsesPassthroughUnsupportedError,
+    ResponsesPassthroughError,
     _get_env_float,
     check_backend_health,
     list_models,
@@ -159,48 +158,13 @@ def _is_deepseek_upstream(upstream_name: str, base_url: str) -> bool:
 
 
 def _is_official_deepseek_base_url(base_url: str) -> bool:
-    host = urlparse(base_url.rstrip("/")).netloc.lower()
-    return host == "api.deepseek.com"
-
-
-def _has_local_responses_session(previous_response_id: str | None) -> bool:
-    if not previous_response_id or _sessions is None:
-        return False
-    return _sessions.get(previous_response_id) is not None
+    return urlparse(base_url.rstrip("/")).netloc.lower() == "api.deepseek.com"
 
 
 def _chat_adapter_for(upstream_name: str, base_url: str) -> DeepSeekChatAdapter:
     if _is_deepseek_upstream(upstream_name, base_url):
-        return DeepSeekChatAdapter(
-            forward_compat_prompt_cache=not _is_official_deepseek_base_url(
-                base_url,
-            ),
-        )
+        return DeepSeekChatAdapter()
     return OpenAIChatAdapter()
-
-
-def _should_try_responses_passthrough(
-    model_type: str,
-    upstream_name: str,
-    base_url: str,
-    previous_response_id: str | None,
-) -> bool:
-    if model_type != "responses":
-        return False
-    if _has_local_responses_session(previous_response_id):
-        return False
-    if not _is_deepseek_upstream(upstream_name, base_url):
-        return False
-    return not _is_official_deepseek_base_url(base_url)
-
-
-def _passthrough_response_to_client_payload(
-    passthrough_response: dict[str, Any],
-    requested_model: str,
-) -> dict[str, Any]:
-    response = dict(passthrough_response)
-    response["model"] = requested_model
-    return response
 
 
 def _int_or_zero(value: Any) -> int:
@@ -254,14 +218,16 @@ def _responses_usage_from_provider(raw_usage: dict[str, Any]) -> dict[str, Any]:
     total_tokens = _int_or_zero(
         raw_usage.get("total_tokens", input_tokens + output_tokens),
     )
-    cached_tokens = _extract_cached_input_tokens(raw_usage)
-    reasoning_tokens = _extract_reasoning_tokens(raw_usage)
 
     return {
         "input_tokens": input_tokens,
-        "input_tokens_details": {"cached_tokens": cached_tokens},
+        "input_tokens_details": {
+            "cached_tokens": _extract_cached_input_tokens(raw_usage),
+        },
         "output_tokens": output_tokens,
-        "output_tokens_details": {"reasoning_tokens": reasoning_tokens},
+        "output_tokens_details": {
+            "reasoning_tokens": _extract_reasoning_tokens(raw_usage),
+        },
         "total_tokens": total_tokens,
     }
 
@@ -574,7 +540,7 @@ def _normalize_responses_tools(
 def _build_sse_response(
     response_id: str,
     output_items: list[dict[str, Any]],
-    usage: dict[str, int],
+    usage: dict[str, Any],
 ) -> Response:
     """Build SSE streaming response in Responses API format."""
     return Response(
@@ -686,18 +652,18 @@ def responses_api() -> tuple[Any, int]:
         tools_raw = data.get("tools", [])
         normalized_tools = _normalize_responses_tools(tools_raw)
         client_requested_stream = data.get("stream", False)
-        previous_response_id = data.get("previous_response_id")
+
+        # Convert tools to Chat format for internal use
+        tools = normalized_tools
 
         model_type, upstream_name, base_url, api_key, upstream_model = _resolve(
             model,
             data,
             None,
         )
-        if _should_try_responses_passthrough(
-            model_type,
-            upstream_name,
-            base_url,
-            previous_response_id,
+        if (
+            model_type == "responses_passthrough"
+            and not _is_official_deepseek_base_url(base_url)
         ):
             passthrough_payload = dict(data)
             passthrough_payload["model"] = upstream_model
@@ -710,39 +676,49 @@ def responses_api() -> tuple[Any, int]:
                     base_url,
                     api_key,
                 )
-                passthrough_usage = passthrough_response.get("usage", {})
-                response = _passthrough_response_to_client_payload(
-                    passthrough_response,
-                    model,
-                )
-                log_debug("CLIENT_RESPONSE /v1/responses", {
-                    "status": "passthrough_success",
-                    "model": model,
-                    "model_type": model_type,
-                    "upstream": upstream_name,
-                    "usage": passthrough_usage,
-                })
-                if client_requested_stream:
-                    return _build_sse_response(
-                        response["id"],
-                        response.get("output", []),
-                        passthrough_usage,
-                    )
-                return jsonify(response), 200
-            except ResponsesPassthroughUnsupportedError as exc:
-                log_debug("RESPONSES_PASSTHROUGH_FALLBACK", {
+            except ResponsesPassthroughError as exc:
+                log_debug("RESPONSES_PASSTHROUGH_ERROR", {
                     "model": model,
                     "upstream": upstream_name,
-                    "reason": str(exc),
-                    "fallback_kind": (
-                        "transient"
-                        if isinstance(exc, ResponsesPassthroughTransientError)
-                        else "unsupported"
-                    ),
+                    "error": str(exc),
                 })
+                return jsonify({
+                    "error": {
+                        "type": "provider_error",
+                        "message": str(exc),
+                    },
+                }), exc.status_code
+            except Exception as exc:
+                log_debug("RESPONSES_PASSTHROUGH_ERROR", {
+                    "model": model,
+                    "upstream": upstream_name,
+                    "error": str(exc),
+                })
+                return jsonify({
+                    "error": {
+                        "type": "provider_error",
+                        "message": str(exc),
+                    },
+                }), 502
 
-        # Convert tools to Chat format for internal use
-        tools = normalized_tools
+            response = dict(passthrough_response)
+            response["model"] = model
+            usage = _responses_usage_from_provider(response.get("usage", {}))
+            response["usage"] = usage
+            log_debug("CLIENT_RESPONSE /v1/responses", {
+                "status": "passthrough_success",
+                "model": model,
+                "model_type": model_type,
+                "upstream": upstream_name,
+                "usage": usage,
+            })
+            if client_requested_stream:
+                return _build_sse_response(
+                    response["id"],
+                    response.get("output", []),
+                    usage,
+                )
+            return jsonify(response), 200
 
         state_machine = ResponsesStateMachine(_sessions)
         turn = state_machine.ingest_request(data, model)

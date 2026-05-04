@@ -28,8 +28,24 @@ api_key = "not-needed"
 #                 Tools come from Codex, execution happens locally.
 #   "responses" - Stateful. Accumulate conversation items in session store,
 #                 convert to Chat API format, forward to upstream.
+#   "responses_passthrough"
+#               - Provider-owned Responses. Forward to upstream /v1/responses
+#                 with light schema normalization. Use only for providers that
+#                 expose a compatible Responses API and own response state.
 #   "chat"       - Stateless. Convert Responses API input to Chat format,
 #                 forward to upstream. No session accumulation.
+
+# Example third-party DeepSeek-compatible gateway with native Responses:
+#
+# [upstream.deepseek_gateway]
+# base_url = "https://zapi.aicc0.com/v1"
+# api_key_env = "DEEPSEEK_GATEWAY_API_KEY"
+#
+# [[routes]]
+# pattern = "deepseek-v4-pro-gateway"
+# type = "responses_passthrough"
+# upstream = "deepseek_gateway"
+# upstream_model = "deepseek-v4-pro"
 
 [[routes]]
 pattern = "mirothinker-*"

@@ -15,8 +15,8 @@ Its current job is:
 - adapt provider responses back into Codex-compatible Responses output
 - expose enough SSE shape for current Codex streaming usage
 
-The main target today is Codex with DeepSeek official Chat API and MiroThinker
-MCP-first behavior.
+The main target today is Codex with DeepSeek official Chat API, explicit
+third-party Responses passthrough routes, and MiroThinker MCP-first behavior.
 
 ## Main Modules
 
@@ -46,12 +46,15 @@ Codex /v1/responses request
   -> JSON or Responses SSE returned to Codex
 ```
 
-For `/v1/responses`, all route types go through local Responses state. Route
-type only decides provider conversion behavior:
+For `/v1/responses`, normal router-owned routes go through local Responses
+state. Route type decides provider conversion behavior:
 
 - `chat`: Chat-compatible provider adapter
 - `mcp_first`: MiroThinker MCP XML prompt and parser
 - `responses`: generic OpenAI-compatible behavior where configured
+- `responses_passthrough`: provider-owned native Responses. The router forwards
+  to upstream `/v1/responses` after light tool schema normalization and does not
+  create local response state for those provider-owned response IDs.
 
 ## State Ownership
 
@@ -86,18 +89,26 @@ single-router usage. It is not yet a strong concurrent multi-process store.
 Failed upstream requests must not commit input items, tool-output satisfaction,
 assistant output, or provider sidecar updates.
 
+For `responses_passthrough`, the upstream provider owns response IDs,
+`previous_response_id`, and continuation state. If such a provider request
+fails, the router returns a provider error instead of attempting to recover that
+provider-owned response ID through the local state machine.
+
 ## Current Provider Behavior
 
 ### DeepSeek
 
 DeepSeek is a Chat API route with provider-specific filtering and reconstruction.
+Official DeepSeek at `https://api.deepseek.com` must stay on this Chat route.
 
 Current DeepSeek behavior:
 
 - drops unsupported Responses-only fields such as `client_metadata`
 - maps `reasoning.effort` to Chat-compatible `reasoning_effort`
 - normalizes `developer` role for Chat backends
-- rewrites Codex `custom` and `web_search` tools into Chat `function` tools
+- rewrites Codex `custom` tools into Chat `function` tools
+- filters unsupported hosted Responses tools such as `web_search` on DeepSeek
+  routes, producing an empty/no-op provider tool surface instead of a 400
 - restores wrapped custom calls as Responses output items
 - persists and replays `reasoning_content` required by DeepSeek thinking mode
 
@@ -122,17 +133,32 @@ Current MiroThinker behavior:
 Generic Chat backends use allowlisted payload forwarding. Do not assume that
 every OpenAI-compatible endpoint accepts Responses fields.
 
+### Responses Passthrough
+
+`responses_passthrough` is for explicitly configured third-party providers that
+expose a compatible native `/v1/responses` endpoint. This route type is not
+inferred from model names or provider URLs. Multiple DeepSeek-compatible
+providers should be represented as separate named upstreams in `router.toml`.
+
+The router still normalizes tool schemas such as `input_schema` to Responses
+`parameters`, rewrites the client-facing model to `upstream_model`, and can
+simulate Responses SSE for non-streaming upstream calls. It does not validate
+or persist provider-owned pending tool state locally.
+
 ## Streaming Today
 
 The router currently accepts `stream: true`, but provider payloads are forced to
 non-streaming internally. If Codex requested streaming, the router returns a
-minimal simulated Responses SSE sequence:
+simulated Responses SSE sequence:
 
 - `response.created`
+- `response.output_item.added`
+- `response.output_text.delta` or `response.function_call_arguments.delta`
 - `response.output_item.done`
 - `response.completed`
 
-This is enough for basic item delivery. It is not full Responses SSE parity.
+This is enough for current item and tool-argument delivery. It is not full
+Responses SSE parity.
 
 ## Logging
 

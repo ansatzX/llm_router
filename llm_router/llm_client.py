@@ -75,25 +75,6 @@ def _get_env_float(key: str, default: float) -> float:
         return default
 
 
-def _get_env_int(key: str, default: int) -> int:
-    """Safely parse int from environment variable.
-
-    Args:
-        key: Environment variable name.
-        default: Default int value if variable is not set or invalid.
-
-    Returns:
-        Parsed int value from environment or default.
-    """
-    value = os.environ.get(key)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
-
-
 # Standard OpenAI chat completion parameters (whitelist)
 OPENAI_PARAMS: set[str] = {
     "temperature", "top_p", "n", "stream", "stop", "max_tokens",
@@ -101,14 +82,6 @@ OPENAI_PARAMS: set[str] = {
     "logit_bias", "user", "response_format", "seed", "tools", "tool_choice",
     "parallel_tool_calls", "logprobs", "top_logprobs", "reasoning_effort",
     "service_tier",
-}
-
-
-# Default parameter values applied to every backend request.
-DEFAULT_PARAMS: dict[str, float | int] = {
-    "temperature": _get_env_float("DEFAULT_TEMPERATURE", 1.0),
-    "top_p": _get_env_float("DEFAULT_TOP_P", 0.95),
-    "max_tokens": _get_env_int("DEFAULT_MAX_TOKENS", 16384),
 }
 
 
@@ -122,12 +95,14 @@ _CLIENT_CACHE: dict[tuple[str, str], OpenAI] = {}
 _CLIENT_CACHE_LOCK = threading.Lock()
 
 
-class ResponsesPassthroughUnsupportedError(Exception):
-    """Raised when an upstream does not support native /v1/responses passthrough."""
+class ResponsesPassthroughError(Exception):
+    """Raised when a provider-owned Responses request fails."""
+
+    status_code = 502
 
 
-class ResponsesPassthroughTransientError(ResponsesPassthroughUnsupportedError):
-    """Raised when passthrough is temporarily unavailable and should fall back."""
+class ResponsesPassthroughUnsupportedError(ResponsesPassthroughError):
+    """Raised when an upstream does not support native /v1/responses."""
 
 
 def _normalize_base_url(llm_base_url: str) -> str:
@@ -190,11 +165,7 @@ def make_llm_request(payload: dict[str, Any], llm_base_url: str, api_key: str | 
     client = _get_client(llm_base_url, api_key)
 
     try:
-        # Apply defaults only for missing parameters (efficient merge)
         params = payload.copy()
-        for key, value in DEFAULT_PARAMS.items():
-            if key not in params:
-                params[key] = value
 
         model = params.pop("model", "default")
         messages = params.pop("messages", [])
@@ -261,7 +232,7 @@ def make_responses_request(
         with httpx.Client(timeout=get_request_timeout()) as client:
             response = client.post(url, headers=headers, json=payload)
     except httpx.TransportError as exc:
-        raise ResponsesPassthroughTransientError(
+        raise ResponsesPassthroughError(
             f"Responses passthrough transport failure: {exc}",
         ) from exc
 
@@ -283,21 +254,7 @@ def make_responses_request(
         ) from exc
 
     if response.status_code >= 400:
-        error = result.get("error")
-        if isinstance(error, dict):
-            message = str(error.get("message", ""))
-            error_type = str(error.get("type", ""))
-            unsupported_markers = (
-                "not found",
-                "unsupported",
-                "not supported",
-                "unknown endpoint",
-            )
-            if any(marker in message.lower() for marker in unsupported_markers):
-                raise ResponsesPassthroughUnsupportedError(message)
-            if any(marker in error_type.lower() for marker in unsupported_markers):
-                raise ResponsesPassthroughUnsupportedError(error_type)
-        raise Exception(
+        raise ResponsesPassthroughError(
             f"Responses request error: HTTP {response.status_code} {result}",
         )
 

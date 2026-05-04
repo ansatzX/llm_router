@@ -122,12 +122,14 @@ them to DeepSeek chat models.
 ## Tool Semantics
 
 Codex can send Responses tools that are not native Chat `function` tools, such
-as `custom` and `web_search`.
+as `custom`, and hosted Responses tools such as `web_search`.
 
 Router rule:
 
 - preserve tool semantics when adapting to a provider
 - convert unsupported provider tool shapes explicitly
+- handle unsupported hosted tools at the provider adapter boundary instead of
+  letting provider errors abort Codex turns
 - do not silently drop tools to make a provider request pass validation
 
 For DeepSeek official Chat API, all upstream tools must end up as

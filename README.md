@@ -4,6 +4,8 @@
 providers. The project is currently centered on two paths:
 
 - DeepSeek official API through its Chat-compatible API surface.
+- Explicit third-party Responses passthrough routes for providers that expose
+  their own `/v1/responses` state machine.
 - MiroThinker models that prefer MCP/XML tool calls.
 
 Codex still executes local tools. The router only adapts requests and responses
@@ -17,6 +19,23 @@ The default route config is in [`router.toml`](router.toml).
 | --- | --- | --- | --- |
 | `deepseek-*` | `chat` | `deepseek` | Main supported route. Codex tools are forwarded as Chat `function` tools. |
 | `mirothinker-*` | `mcp_first` | `mirothinker` | MCP-first route. Native tools are converted to an MCP XML prompt. |
+
+Third-party providers that expose a compatible native `/v1/responses` endpoint
+can be configured explicitly with `type = "responses_passthrough"`. Official
+DeepSeek at `https://api.deepseek.com` should stay on the `chat` route because
+this router targets DeepSeek's Chat API there.
+
+```toml
+[upstream.deepseek_gateway]
+base_url = "https://zapi.aicc0.com/v1"
+api_key_env = "DEEPSEEK_GATEWAY_API_KEY"
+
+[[routes]]
+pattern = "deepseek-v4-pro-gateway"
+type = "responses_passthrough"
+upstream = "deepseek_gateway"
+upstream_model = "deepseek-v4-pro"
+```
 
 ## Install
 
@@ -90,8 +109,10 @@ The adapter currently handles:
 
 - Responses items to Chat messages.
 - `developer` role to `system` role.
-- Codex `function`, `custom`, and `web_search` tools as DeepSeek-compatible Chat
-  `function` tools.
+- Codex `function` and `custom` tools as DeepSeek-compatible Chat `function`
+  tools.
+- DeepSeek-route filtering for unsupported hosted Responses tools such as
+  `web_search`.
 - DeepSeek Chat `tool_calls` back to Codex Responses output items.
 - DeepSeek `reasoning_content` round trip when available.
 - Tool-call ordering repairs when Codex inserts side-channel messages between a
