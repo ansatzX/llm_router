@@ -1,7 +1,7 @@
 # LLM Router
 
 `llm-router` is a local router for adapting Codex traffic to non-OpenAI model
-providers. The project is currently centered on two paths:
+providers. The project is currently centered on these route families:
 
 - DeepSeek official API through its Chat-compatible API surface.
 - Explicit third-party Responses passthrough routes for providers that expose
@@ -26,6 +26,10 @@ DeepSeek at `https://api.deepseek.com` should stay on the `chat` route because
 this router targets DeepSeek's Chat API there.
 
 ```toml
+[upstream.deepseek]
+base_url = "https://api.deepseek.com"
+api_key_env = "DEEPSEEK_API_KEY"
+
 [upstream.deepseek_gateway]
 base_url = "https://zapi.aicc0.com/v1"
 api_key_env = "DEEPSEEK_GATEWAY_API_KEY"
@@ -35,7 +39,15 @@ pattern = "deepseek-v4-pro-gateway"
 type = "responses_passthrough"
 upstream = "deepseek_gateway"
 upstream_model = "deepseek-v4-pro"
+
+[[routes]]
+pattern = "deepseek-*"
+type = "chat"
+upstream = "deepseek"
 ```
+
+Route order matters: first match wins. Put specific passthrough model aliases
+before broad `deepseek-*` Chat routes.
 
 ## Install
 
@@ -45,10 +57,12 @@ uv sync
 
 ## Configure
 
-Set the upstream key used by `router.toml`:
+Set the upstream keys used by `router.toml`:
 
 ```bash
 export DEEPSEEK_API_KEY="sk-..."
+# Optional, only if you enable a responses_passthrough gateway route:
+export DEEPSEEK_GATEWAY_API_KEY="sk-..."
 ```
 
 The repo includes these Codex helper files:

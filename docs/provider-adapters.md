@@ -6,8 +6,10 @@ Every provider has a slightly different Chat or Responses implementation. The
 router should isolate those differences in provider adapters rather than
 spreading compatibility code through `server.py` or `llm_client.py`.
 
-Provider adapters decide what the upstream receives. The Responses state
-machine decides what Codex receives and what gets committed to session state.
+Provider adapters decide what the upstream receives. For router-owned routes,
+the Responses state machine decides what Codex receives and what gets committed
+to session state. `responses_passthrough` is provider-owned state by explicit
+route contract.
 
 ## Adding A Provider
 
@@ -41,9 +43,9 @@ An adapter may handle:
 
 An adapter should not:
 
-- commit session state
-- create response IDs
-- validate global pending-tool state
+- commit router-owned session state
+- create router-owned response IDs
+- validate global pending-tool state for router-owned routes
 - implement Codex collaboration policy
 - inject provider parameters into unrelated providers
 - drop unsupported payloads silently

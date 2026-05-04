@@ -15,6 +15,13 @@ api_key_env = "AIHUBMIX_API_KEY"
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
 
+# Optional example. Enable only when the gateway exposes a compatible native
+# /v1/responses endpoint and owns response state.
+#
+# [upstream.deepseek_gateway]
+# base_url = "https://zapi.aicc0.com/v1"
+# api_key_env = "DEEPSEEK_GATEWAY_API_KEY"
+
 [upstream.mirothinker]
 base_url = "http://localhost:8000/v1"
 api_key = "not-needed"
@@ -35,11 +42,8 @@ api_key = "not-needed"
 #   "chat"       - Stateless. Convert Responses API input to Chat format,
 #                 forward to upstream. No session accumulation.
 
-# Example third-party DeepSeek-compatible gateway with native Responses:
-#
-# [upstream.deepseek_gateway]
-# base_url = "https://zapi.aicc0.com/v1"
-# api_key_env = "DEEPSEEK_GATEWAY_API_KEY"
+# Example third-party DeepSeek-compatible gateway with native Responses. Keep
+# this before the broad "deepseek-*" Chat route because first match wins.
 #
 # [[routes]]
 # pattern = "deepseek-v4-pro-gateway"

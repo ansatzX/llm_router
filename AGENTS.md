@@ -4,8 +4,10 @@
 
 `llm_router` is a Codex-facing Responses compatibility runtime, not a generic
 HTTP proxy. It accepts Codex/OpenAI-style `/v1/responses` traffic, maintains
-local response state, adapts requests to provider-specific Chat APIs, and
-reconstructs Responses-shaped output for Codex.
+local response state for router-owned routes, adapts requests to
+provider-specific Chat APIs, and reconstructs Responses-shaped output for
+Codex. The explicit `responses_passthrough` route type is the exception:
+there, a compatible upstream owns native Responses state.
 
 ## Hard Gate Before Editing
 
@@ -64,7 +66,9 @@ Typical flow:
 2. Add an adapter module if behavior differs from existing adapters.
 3. Wire adapter selection in the smallest possible place, normally near
    `_chat_adapter_for`.
-4. Preserve the normalized Responses state-machine contract.
+4. Preserve the normalized Responses state-machine contract for router-owned
+   routes, or use an explicit `responses_passthrough` route when the upstream
+   owns a compatible native Responses API.
 5. Add tests that prove the provider-specific behavior and the Codex-facing
    response shape.
 
@@ -74,8 +78,8 @@ transport-level. Do not globally inject provider parameters such as
 
 ## Adapter Responsibilities
 
-Provider adapters decide what the upstream receives. The Responses state
-machine decides what Codex receives.
+Provider adapters decide what the upstream receives. For router-owned routes,
+the Responses state machine decides what Codex receives.
 
 Adapters should:
 
@@ -84,7 +88,8 @@ Adapters should:
 - normalize unsupported roles such as `developer` only when required
 - convert Codex tools without dropping them silently
 - preserve provider-required replay data such as DeepSeek `reasoning_content`
-- return normalized output items for the state machine to commit
+- return normalized output items for the state machine to commit on
+  router-owned routes
 
 Adapters should not:
 
@@ -96,8 +101,14 @@ Adapters should not:
 
 ## State Machine Boundary
 
-`/v1/responses` must behave statefully for all route types. The route type
-selects provider conversion behavior; it does not bypass state management.
+`/v1/responses` must behave statefully for all router-owned route types. The
+route type normally selects provider conversion behavior; it must not bypass
+state management implicitly.
+
+`responses_passthrough` is the explicit exception. Use it only for a provider
+that exposes a compatible native `/v1/responses` API and owns response IDs,
+`previous_response_id`, pending tool state, and continuation semantics. Official
+DeepSeek at `https://api.deepseek.com` must remain on the Chat adapter path.
 
 The state machine owns:
 
@@ -112,6 +123,11 @@ The state machine owns:
 Bad case: committing user input, tool output, or provider sidecar state before
 the upstream response succeeds. Failed upstream requests must not advance the
 session.
+
+For `responses_passthrough`, provider-owned `previous_response_id` values must
+not be recovered through the local session store. If the provider continuation
+fails, return an explicit provider error rather than falling back to local Chat
+emulation.
 
 ## Codex Compatibility Boundaries
 
@@ -215,9 +231,14 @@ Stop and re-check the evidence if a change:
 - fixes generic chat by breaking DeepSeek thinking-mode replay
 - adds provider fields outside the provider adapter
 - silently drops image, hosted-tool, reasoning, or tool-call data
+- infers native Responses passthrough from provider names or URLs instead of an
+  explicit `responses_passthrough` route
 - changes Plan/Fast behavior without a Codex source reference
 - creates tests that only assert implementation shape, not runtime behavior
-- commits session state before the upstream response is known to be valid
+- commits session state before the upstream response is known to be valid on a
+  router-owned route
 
 The right fix should preserve Codex-facing behavior, provider API validity, and
-local state-machine consistency at the same time.
+local state-machine consistency at the same time. For `responses_passthrough`,
+the same standard applies with provider-owned state explicitly documented and
+tested.
