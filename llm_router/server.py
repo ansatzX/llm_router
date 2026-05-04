@@ -529,20 +529,40 @@ def convert_chat_tool_to_responses(tool: dict[str, Any]) -> dict[str, Any]:
     if tool.get("type") == "function":
         if "function" in tool:
             func = tool["function"]
+            parameters = func.get("parameters")
+            if parameters is None:
+                parameters = func.get("input_schema", {})
             return {
                 "type": "function",
                 "name": func.get("name", ""),
                 "description": func.get("description", ""),
-                "parameters": func.get("parameters", {}),
+                "parameters": parameters,
             }
         elif "name" in tool:
-            return tool
+            normalized = dict(tool)
+            if "parameters" not in normalized and "input_schema" in normalized:
+                normalized["parameters"] = normalized["input_schema"]
+            normalized.pop("input_schema", None)
+            return normalized
     return tool
 
 
 def convert_responses_tool_to_chat(tool: dict[str, Any]) -> dict[str, Any]:
     """Convert Responses API function tool format to Chat Completions format."""
     return _deepseek_adapter.response_tool_to_chat(tool)
+
+
+def _normalize_responses_tools(
+    tools: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Normalize mixed tool schema aliases to the Responses function shape."""
+    if not isinstance(tools, list):
+        return []
+    return [
+        convert_chat_tool_to_responses(tool)
+        for tool in tools
+        if isinstance(tool, dict)
+    ]
 
 
 # ── Tool / Rollback Helpers ────────────────────────────────────────────────
@@ -664,6 +684,7 @@ def responses_api() -> tuple[Any, int]:
         model = data.get("model", "default")
         instructions = data.get("instructions", "")
         tools_raw = data.get("tools", [])
+        normalized_tools = _normalize_responses_tools(tools_raw)
         client_requested_stream = data.get("stream", False)
         previous_response_id = data.get("previous_response_id")
 
@@ -681,6 +702,8 @@ def responses_api() -> tuple[Any, int]:
             passthrough_payload = dict(data)
             passthrough_payload["model"] = upstream_model
             passthrough_payload["stream"] = False
+            if tools_raw:
+                passthrough_payload["tools"] = normalized_tools
             try:
                 passthrough_response = make_responses_request(
                     passthrough_payload,
@@ -719,7 +742,7 @@ def responses_api() -> tuple[Any, int]:
                 })
 
         # Convert tools to Chat format for internal use
-        tools = [convert_chat_tool_to_responses(t) for t in tools_raw]
+        tools = normalized_tools
 
         state_machine = ResponsesStateMachine(_sessions)
         turn = state_machine.ingest_request(data, model)

@@ -12,7 +12,7 @@ def iter_sse_events(
     output_items: list[dict[str, Any]],
     usage: dict[str, Any],
 ) -> Iterator[str]:
-    """Yield a compact Responses SSE sequence compatible with passthrough clients."""
+    """Yield a compact Responses SSE sequence compatible with Codex and CCR."""
     created = {
         "type": "response.created",
         "response": {"id": response_id},
@@ -37,6 +37,32 @@ def iter_sse_events(
                         "delta": content["text"],
                     }
                     yield f"event: response.output_text.delta\ndata: {json.dumps(delta_event)}\n\n"
+        elif item.get("type") in {"function_call", "custom_tool_call"}:
+            added_event = {
+                "type": "response.output_item.added",
+                "output_index": idx,
+                "item": item,
+            }
+            yield f"event: response.output_item.added\ndata: {json.dumps(added_event)}\n\n"
+
+            arguments_delta = item.get("arguments")
+            if item.get("type") == "custom_tool_call":
+                custom_input = item.get("input")
+                arguments_delta = json.dumps(
+                    {"input": custom_input},
+                    ensure_ascii=False,
+                )
+            if arguments_delta:
+                function_event = {
+                    "type": "response.function_call_arguments.delta",
+                    "output_index": idx,
+                    "item_id": item.get("id") or item.get("call_id"),
+                    "delta": arguments_delta,
+                }
+                yield (
+                    "event: response.function_call_arguments.delta\n"
+                    f"data: {json.dumps(function_event)}\n\n"
+                )
 
         item_event = {
             "type": "response.output_item.done",

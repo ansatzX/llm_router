@@ -522,6 +522,89 @@ def test_responses_passthrough_forwards_previous_response_id(
     assert second.get_json()["usage"]["input_tokens_details"]["cached_tokens"] == 9
 
 
+def test_responses_passthrough_normalizes_input_schema_tools(
+    tmp_path,
+    monkeypatch,
+):
+    """Anthropic-style tool schemas should be normalized before passthrough."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    mock_make_responses_request = server_mod.make_responses_request
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://zapi.aicc0.com",
+    )
+    server_mod._config.default_model_type = "responses"
+    server_mod._config.default_upstream = "deepseek"
+    mock_make_responses_request.return_value = {
+        "id": "resp_passthrough",
+        "object": "response",
+        "created": 123,
+        "model": "accounts/demo/deployments/abc",
+        "output": [
+            {
+                "type": "function_call",
+                "id": "call_bash",
+                "call_id": "call_bash",
+                "name": "Bash",
+                "arguments": '{"command":"printf 123","description":"print 123"}',
+            }
+        ],
+        "usage": {
+            "input_tokens": 12,
+            "input_tokens_details": {"cached_tokens": 0},
+            "output_tokens": 3,
+            "output_tokens_details": {"reasoning_tokens": 0},
+            "total_tokens": 15,
+        },
+        "status": "completed",
+    }
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "deepseek-v4-pro",
+            "input": "Use the Bash tool once.",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "Bash",
+                    "description": "Run a shell command.",
+                    "input_schema": {
+                        "type": "object",
+                        "properties": {
+                            "command": {"type": "string"},
+                            "description": {"type": "string"},
+                        },
+                        "required": ["command", "description"],
+                    },
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert mock_make_request.call_count == 0
+    passthrough_payload = mock_make_responses_request.call_args.args[0]
+    assert passthrough_payload["tools"][0]["type"] == "function"
+    assert passthrough_payload["tools"][0]["name"] == "Bash"
+    assert passthrough_payload["tools"][0]["description"] == "Run a shell command."
+    assert passthrough_payload["tools"][0]["parameters"] == {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string"},
+            "description": {"type": "string"},
+        },
+        "required": ["command", "description"],
+    }
+
+
 def test_responses_passthrough_falls_back_to_chat_emulation_when_unsupported(
     tmp_path,
     monkeypatch,
