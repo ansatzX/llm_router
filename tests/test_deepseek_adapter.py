@@ -54,6 +54,30 @@ def test_deepseek_maps_responses_reasoning_effort_and_drops_service_tier():
     }
 
 
+def test_deepseek_gateway_can_forward_compat_prompt_cache_fields():
+    adapter = DeepSeekChatAdapter(forward_compat_prompt_cache=True)
+
+    payload = {
+        "model": "deepseek-v4-pro",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": False,
+        "prompt_cache_key": "cache-key",
+        "prompt_cache_retention": {"type": "persistent"},
+        "reasoning": {"effort": "high"},
+    }
+
+    filtered = adapter.filter_request_payload(payload)
+
+    assert filtered == {
+        "model": "deepseek-v4-pro",
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": False,
+        "prompt_cache_key": "cache-key",
+        "prompt_cache_retention": {"type": "persistent"},
+        "reasoning_effort": "high",
+    }
+
+
 def test_deepseek_groups_parallel_response_function_calls():
     adapter = DeepSeekChatAdapter()
 
@@ -350,8 +374,10 @@ def test_deepseek_restores_plain_chat_response_and_caches_reasoning():
 
     assert output_text == "done"
     assert tool_calls == []
+    assert output_items[0]["id"].startswith("msg_")
     assert output_items == [
         {
+            "id": output_items[0]["id"],
             "type": "message",
             "role": "assistant",
             "content": [{"type": "output_text", "text": "done"}],
