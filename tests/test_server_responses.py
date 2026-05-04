@@ -423,6 +423,8 @@ def test_responses_non_official_deepseek_uses_native_responses_passthrough(
     assert passthrough_payload["model"] == "deepseek-v4-pro"
     assert passthrough_payload["stream"] is False
     assert passthrough_payload["prompt_cache_key"] == "cache-key"
+    assert b"response.output_item.added" in response.data
+    assert b"response.output_text.delta" in response.data
     assert b"response.completed" in response.data
     assert b"cached_tokens" in response.data
 
@@ -660,6 +662,78 @@ def test_responses_can_rewrite_requested_model_to_provider_model(
     payload = mock_make_request.call_args.args[0]
     assert payload["model"] == "deepseek-v4-flash"
     assert response.get_json()["model"] == "gpt-5.4-mini"
+
+
+def test_responses_usage_maps_cached_and_reasoning_tokens_to_responses_shape(
+    tmp_path,
+    monkeypatch,
+):
+    """Codex expects nested Responses usage details for cache and reasoning."""
+    client, _ = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 11,
+                "completion_tokens": 7,
+                "total_tokens": 18,
+                "prompt_tokens_details": {"cached_tokens": 5},
+                "reasoning_tokens": 3,
+            },
+        },
+    )
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "test-model", "input": "hi"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["usage"] == {
+        "input_tokens": 11,
+        "input_tokens_details": {"cached_tokens": 5},
+        "output_tokens": 7,
+        "output_tokens_details": {"reasoning_tokens": 3},
+        "total_tokens": 18,
+    }
+
+
+def test_responses_usage_maps_deepseek_cache_hit_tokens_to_responses_shape(
+    tmp_path,
+    monkeypatch,
+):
+    """DeepSeek cache-hit counters should surface as cached input tokens."""
+    client, _ = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 13,
+                "completion_tokens": 2,
+                "total_tokens": 15,
+                "prompt_cache_hit_tokens": 8,
+                "reasoning_output_tokens": 1,
+            },
+        },
+    )
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "test-model", "input": "hi"},
+    )
+
+    assert response.status_code == 200
+    assert response.get_json()["usage"] == {
+        "input_tokens": 13,
+        "input_tokens_details": {"cached_tokens": 8},
+        "output_tokens": 2,
+        "output_tokens_details": {"reasoning_tokens": 1},
+        "total_tokens": 15,
+    }
 
 
 def test_responses_memory_phase_one_request_rewrites_only_fixed_small_model(

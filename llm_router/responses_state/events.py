@@ -12,7 +12,7 @@ def iter_sse_events(
     output_items: list[dict[str, Any]],
     usage: dict[str, Any],
 ) -> Iterator[str]:
-    """Yield the minimal SSE event sequence Codex needs today."""
+    """Yield a compact Responses SSE sequence compatible with passthrough clients."""
     created = {
         "type": "response.created",
         "response": {"id": response_id},
@@ -20,6 +20,24 @@ def iter_sse_events(
     yield f"event: response.created\ndata: {json.dumps(created)}\n\n"
 
     for idx, item in enumerate(output_items):
+        if item.get("type") == "message":
+            added_event = {
+                "type": "response.output_item.added",
+                "output_index": idx,
+                "item": item,
+            }
+            yield f"event: response.output_item.added\ndata: {json.dumps(added_event)}\n\n"
+
+            for content in item.get("content", []):
+                if content.get("type") == "output_text" and content.get("text"):
+                    delta_event = {
+                        "type": "response.output_text.delta",
+                        "output_index": idx,
+                        "item_id": item.get("id"),
+                        "delta": content["text"],
+                    }
+                    yield f"event: response.output_text.delta\ndata: {json.dumps(delta_event)}\n\n"
+
         item_event = {
             "type": "response.output_item.done",
             "output_index": idx,
