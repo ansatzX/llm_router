@@ -22,6 +22,10 @@ machine decides what Codex receives and what gets committed to session state.
 Use explicit route-level `upstream_model` for provider model-name translation.
 Do not hard-code normal model aliases in the transport layer.
 
+If a provider owns a compatible native `/v1/responses` endpoint, use an explicit
+`type = "responses_passthrough"` route. Do not infer passthrough from names like
+`deepseek` or from a non-official base URL.
+
 ## Adapter Contract
 
 An adapter may handle:
@@ -111,6 +115,18 @@ MCP-first means:
 Do not apply MCP-first behavior to other providers unless provider behavior has
 been verified.
 
+## Responses Passthrough
+
+`responses_passthrough` is a route-level contract. The provider owns response
+IDs, continuation state, and provider-side pending tool bookkeeping. The router
+may normalize request schema aliases and reconstruct SSE shape for Codex, but it
+must not pretend provider-owned `previous_response_id` values can be recovered
+through the local session store.
+
+Official DeepSeek remains a Chat adapter target. Third-party DeepSeek-compatible
+gateways with native Responses support should be separate named upstreams, for
+example `deepseek_gateway` or `aicc0`.
+
 ## Bad Cases
 
 Stop and redesign if a provider change:
@@ -119,6 +135,7 @@ Stop and redesign if a provider change:
 - sends undocumented fields upstream
 - treats model name alone as workload identity
 - silently ignores multimodal, hosted-tool, or reasoning data
-- bypasses the Responses state machine for `/v1/responses`
+- implicitly bypasses the Responses state machine without an explicit
+  `responses_passthrough` route
 - commits state before upstream success
 - makes tests pass by asserting only helper structure

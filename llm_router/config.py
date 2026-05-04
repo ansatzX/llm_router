@@ -9,6 +9,8 @@ from pathlib import Path
 
 import tomllib
 
+ROUTE_TYPES = {"chat", "mcp_first", "responses", "responses_passthrough"}
+
 DEFAULT_CONFIG_PATHS = [
     Path("router.toml"),
     Path.home() / ".config/llm-router/router.toml",
@@ -32,7 +34,7 @@ class UpstreamConfig:
 @dataclass
 class RouteConfig:
     pattern: str
-    model_type: str = "chat"  # "chat" | "mcp_first" | "responses"
+    model_type: str = "chat"
     upstream: str = "default"
     upstream_model: str = ""
 
@@ -109,7 +111,16 @@ class RouterConfig:
             raise ValueError(
                 f"default_route.upstream '{self.default_upstream}' not in upstreams"
             )
+        if self.default_model_type not in ROUTE_TYPES:
+            raise ValueError(
+                f"unknown route type for default_route: {self.default_model_type!r}"
+            )
         for route in self.routes:
+            if route.model_type not in ROUTE_TYPES:
+                raise ValueError(
+                    f"unknown route type for route '{route.pattern}': "
+                    f"{route.model_type!r}"
+                )
             if route.upstream not in self.upstreams:
                 raise ValueError(
                     f"Route '{route.pattern}' references unknown upstream '{route.upstream}'"

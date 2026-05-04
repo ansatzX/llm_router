@@ -12,7 +12,7 @@ def iter_sse_events(
     output_items: list[dict[str, Any]],
     usage: dict[str, Any],
 ) -> Iterator[str]:
-    """Yield the minimal SSE event sequence Codex needs today."""
+    """Yield a compact Responses SSE sequence."""
     created = {
         "type": "response.created",
         "response": {"id": response_id},
@@ -20,6 +20,55 @@ def iter_sse_events(
     yield f"event: response.created\ndata: {json.dumps(created)}\n\n"
 
     for idx, item in enumerate(output_items):
+        if item.get("type") == "message":
+            added_item = dict(item)
+            added_item["content"] = [
+                {key: value for key, value in content.items() if key != "text"}
+                for content in item.get("content", [])
+                if isinstance(content, dict)
+            ]
+            added_event = {
+                "type": "response.output_item.added",
+                "output_index": idx,
+                "item": added_item,
+            }
+            yield f"event: response.output_item.added\ndata: {json.dumps(added_event)}\n\n"
+
+            for content in item.get("content", []):
+                if content.get("type") == "output_text" and content.get("text"):
+                    delta_event = {
+                        "type": "response.output_text.delta",
+                        "output_index": idx,
+                        "item_id": item.get("id"),
+                        "delta": content["text"],
+                    }
+                    yield f"event: response.output_text.delta\ndata: {json.dumps(delta_event)}\n\n"
+        elif item.get("type") in {"function_call", "custom_tool_call"}:
+            added_item = dict(item)
+            added_item.pop("arguments", None)
+            added_item.pop("input", None)
+            added_event = {
+                "type": "response.output_item.added",
+                "output_index": idx,
+                "item": added_item,
+            }
+            yield f"event: response.output_item.added\ndata: {json.dumps(added_event)}\n\n"
+
+            arguments_delta = item.get("arguments")
+            if item.get("type") == "custom_tool_call":
+                arguments_delta = item.get("input")
+            if arguments_delta:
+                function_event = {
+                    "type": "response.function_call_arguments.delta",
+                    "output_index": idx,
+                    "item_id": item.get("id") or item.get("call_id"),
+                    "delta": arguments_delta,
+                }
+                yield (
+                    "event: response.function_call_arguments.delta\n"
+                    f"data: {json.dumps(function_event)}\n\n"
+                )
+
         item_event = {
             "type": "response.output_item.done",
             "output_index": idx,

@@ -95,6 +95,25 @@ _CLIENT_CACHE: dict[tuple[str, str], OpenAI] = {}
 _CLIENT_CACHE_LOCK = threading.Lock()
 
 
+class ResponsesPassthroughError(Exception):
+    """Raised when a provider-owned Responses request fails."""
+
+    status_code = 502
+
+
+class ResponsesPassthroughUnsupportedError(ResponsesPassthroughError):
+    """Raised when an upstream does not support native /v1/responses."""
+
+
+def _normalize_base_url(llm_base_url: str) -> str:
+    """Normalize an upstream base URL, appending /v1 for host-only URLs."""
+    base_url = llm_base_url.rstrip("/")
+    parsed = urlparse(base_url)
+    if not parsed.path or parsed.path == "/":
+        return f"{base_url}/v1"
+    return base_url
+
+
 def _get_client(llm_base_url: str, api_key: str | None) -> OpenAI:
     """Get or create cached OpenAI client instance.
 
@@ -118,12 +137,7 @@ def _get_client(llm_base_url: str, api_key: str | None) -> OpenAI:
             # Check again inside lock
             if cache_key not in _CLIENT_CACHE:
                 # Normalize base_url only on cache miss
-                base_url = llm_base_url.rstrip("/")
-                parsed = urlparse(base_url)
-
-                # Only append /v1 if path is empty
-                if not parsed.path or parsed.path == "/":
-                    base_url = f"{base_url}/v1"
+                base_url = _normalize_base_url(llm_base_url)
 
                 _CLIENT_CACHE[cache_key] = OpenAI(
                     base_url=base_url,
@@ -192,6 +206,81 @@ def make_llm_request(payload: dict[str, Any], llm_base_url: str, api_key: str | 
         return result
     except Exception as e:
         raise Exception(f"LLM request error: {e}") from e
+
+
+def make_responses_request(
+    payload: dict[str, Any],
+    llm_base_url: str,
+    api_key: str | None = None,
+) -> dict[str, Any]:
+    """Make a direct OpenAI Responses API request to a compatible upstream."""
+    url = f"{_normalize_base_url(llm_base_url)}/responses"
+    headers = {"Content-Type": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    log_debug("RESPONSES_PASSTHROUGH_REQUEST", {
+        "url": url,
+        "payload_keys": sorted(payload),
+        "model": payload.get("model"),
+        "stream": payload.get("stream"),
+        "previous_response_id": payload.get("previous_response_id"),
+        "tool_count": len(payload.get("tools", []) or []),
+    })
+
+    try:
+        with httpx.Client(timeout=get_request_timeout()) as client:
+            response = client.post(url, headers=headers, json=payload)
+    except httpx.TransportError as exc:
+        raise ResponsesPassthroughError(
+            f"Responses passthrough transport failure: {exc}",
+        ) from exc
+
+    content_type = response.headers.get("content-type", "").lower()
+    if response.status_code in {404, 405, 415, 501}:
+        raise ResponsesPassthroughUnsupportedError(
+            f"Responses endpoint unsupported: HTTP {response.status_code}",
+        )
+    if "text/html" in content_type:
+        raise ResponsesPassthroughUnsupportedError(
+            "Responses endpoint returned HTML instead of JSON",
+        )
+
+    try:
+        result = response.json()
+    except ValueError as exc:
+        raise ResponsesPassthroughUnsupportedError(
+            "Responses endpoint returned non-JSON content",
+        ) from exc
+
+    if response.status_code >= 400:
+        raise ResponsesPassthroughError(
+            f"Responses request error: HTTP {response.status_code} {result}",
+        )
+
+    if not isinstance(result, dict) or result.get("object") != "response":
+        raise ResponsesPassthroughUnsupportedError(
+            "Responses endpoint returned an unexpected payload shape",
+        )
+    response_id = result.get("id")
+    if not isinstance(response_id, str) or not response_id:
+        raise ResponsesPassthroughUnsupportedError(
+            "Responses endpoint returned a response without a usable id",
+        )
+    output_items = result.get("output")
+    if isinstance(output_items, list):
+        for item in output_items:
+            if (
+                isinstance(item, dict)
+                and item.get("type") == "message"
+                and item.get("role") == "user"
+            ):
+                raise ResponsesPassthroughUnsupportedError(
+                    "Responses endpoint echoed user messages in output",
+                )
+
+    log_debug("RESPONSES_PASSTHROUGH_RESPONSE", result)
+    return result
 
 
 def list_models(llm_base_url: str, api_key: str | None = None) -> dict[str, Any]:
