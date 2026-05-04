@@ -90,8 +90,10 @@ The adapter currently handles:
 
 - Responses items to Chat messages.
 - `developer` role to `system` role.
-- Codex `function`, `custom`, and `web_search` tools as DeepSeek-compatible Chat
-  `function` tools.
+- Codex `function` and `custom` tools as DeepSeek-compatible Chat `function`
+  tools.
+- DeepSeek-route filtering for unsupported hosted Responses tools such as
+  `web_search`.
 - DeepSeek Chat `tool_calls` back to Codex Responses output items.
 - DeepSeek `reasoning_content` round trip when available.
 - Tool-call ordering repairs when Codex inserts side-channel messages between a

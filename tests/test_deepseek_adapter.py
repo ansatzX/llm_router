@@ -144,18 +144,15 @@ def test_deepseek_wraps_responses_only_tools_as_chat_functions():
                 "name": "apply_patch",
                 "description": "freeform patch",
             },
-            {"type": "web_search", "external_web_access": False},
         ]
     )
 
     assert tools[0]["function"]["name"] == "apply_patch"
     assert tools[0]["function"]["parameters"]["required"] == ["input"]
-    assert tools[1]["function"]["name"] == "web_search"
 
 
-def test_deepseek_round_trips_reasoning_from_cache():
+def test_deepseek_round_trips_tool_reasoning_from_cache():
     adapter = DeepSeekChatAdapter()
-    adapter.record_message_reasoning("hello", "message reasoning")
     adapter.record_tool_reasoning("call_1", "tool reasoning")
 
     messages = adapter.flatten_response_items(
@@ -174,16 +171,15 @@ def test_deepseek_round_trips_reasoning_from_cache():
         ]
     )
 
-    assert messages[0]["reasoning_content"] == "message reasoning"
+    assert "reasoning_content" not in messages[0]
     assert messages[1]["reasoning_content"] == "tool reasoning"
 
 
-def test_deepseek_hydrates_reasoning_cache_from_provider_state():
+def test_deepseek_hydrates_tool_reasoning_cache_from_provider_state():
     adapter = DeepSeekChatAdapter()
     adapter.load_provider_state(
         {
             "reasoning_by_call_id": {"call_1": "persisted tool reasoning"},
-            "reasoning_by_message_content": {"hello": "persisted message reasoning"},
         }
     )
 
@@ -203,18 +199,16 @@ def test_deepseek_hydrates_reasoning_cache_from_provider_state():
         ]
     )
 
-    assert messages[0]["reasoning_content"] == "persisted message reasoning"
+    assert "reasoning_content" not in messages[0]
     assert messages[1]["reasoning_content"] == "persisted tool reasoning"
 
 
 def test_deepseek_exports_reasoning_cache_as_provider_state():
     adapter = DeepSeekChatAdapter()
-    adapter.record_message_reasoning("done", "message reasoning")
     adapter.record_tool_reasoning("call_1", "tool reasoning")
 
     assert adapter.dump_provider_state() == {
         "reasoning_by_call_id": {"call_1": "tool reasoning"},
-        "reasoning_by_message_content": {"done": "message reasoning"},
     }
 
 
@@ -337,7 +331,7 @@ def test_deepseek_restores_chat_response_tool_calls_to_responses_items():
     assert adapter.reasoning_by_call_id["call_patch"] == "edit the file"
 
 
-def test_deepseek_restores_plain_chat_response_and_caches_reasoning():
+def test_deepseek_restores_plain_chat_response_with_inline_reasoning_only():
     adapter = DeepSeekChatAdapter()
 
     output_items, output_text, tool_calls = adapter.chat_response_to_output_items(
@@ -358,7 +352,4 @@ def test_deepseek_restores_plain_chat_response_and_caches_reasoning():
             "reasoning_content": "plain response reasoning",
         }
     ]
-    assert (
-        adapter.reasoning_by_message_content["done"]
-        == "plain response reasoning"
-    )
+    assert adapter.dump_provider_state() == {"reasoning_by_call_id": {}}

@@ -44,7 +44,7 @@ mostly extracts text.
 Future behavior should be explicit:
 
 - support multimodal providers correctly, or
-- reject unsupported multimodal payloads clearly before provider calls
+- degrade unsupported multimodal payloads in a provider-specific, observable way
 
 Silent content dropping is not acceptable.
 
@@ -57,8 +57,9 @@ Codex/Responses can represent hosted-tool items such as:
 - tool search calls
 - tool search outputs
 
-Current router behavior mainly treats `web_search` as a callable tool for Chat
-providers. It does not implement hosted-tool execution semantics.
+Current DeepSeek-route behavior filters hosted tools such as `web_search`
+before provider calls. The router does not implement hosted-tool execution
+semantics, so this behaves like an empty/no-op hosted-tool surface for DeepSeek.
 
 Future work should define unsupported behavior first, then add provider support
 only when the execution and output lifecycle are clear.

@@ -97,7 +97,9 @@ Current DeepSeek behavior:
 - drops unsupported Responses-only fields such as `client_metadata`
 - maps `reasoning.effort` to Chat-compatible `reasoning_effort`
 - normalizes `developer` role for Chat backends
-- rewrites Codex `custom` and `web_search` tools into Chat `function` tools
+- rewrites Codex `custom` tools into Chat `function` tools
+- filters unsupported hosted Responses tools such as `web_search` on DeepSeek
+  routes, producing an empty/no-op provider tool surface instead of a 400
 - restores wrapped custom calls as Responses output items
 - persists and replays `reasoning_content` required by DeepSeek thinking mode
 
