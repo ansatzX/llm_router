@@ -368,10 +368,8 @@ def test_deepseek_restores_plain_chat_response_with_inline_reasoning_only():
 
     assert output_text == "done"
     assert tool_calls == []
-    assert output_items[0]["id"].startswith("msg_")
     assert output_items == [
         {
-            "id": output_items[0]["id"],
             "type": "message",
             "role": "assistant",
             "content": [{"type": "output_text", "text": "done"}],

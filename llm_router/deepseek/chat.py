@@ -9,7 +9,6 @@ included in later multi-round requests.
 from __future__ import annotations
 
 import json
-import uuid
 from typing import Any
 
 from llm_router.debug_log import log_debug
@@ -505,7 +504,6 @@ class DeepSeekChatAdapter:
         output_items: list[dict[str, Any]] = []
         if response_text:
             item = {
-                "id": message.get("id") or f"msg_{uuid.uuid4().hex}",
                 "type": "message",
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": response_text}],

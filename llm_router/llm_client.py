@@ -95,12 +95,14 @@ _CLIENT_CACHE: dict[tuple[str, str], OpenAI] = {}
 _CLIENT_CACHE_LOCK = threading.Lock()
 
 
-class ResponsesPassthroughUnsupportedError(Exception):
-    """Raised when an upstream does not support native /v1/responses passthrough."""
+class ResponsesPassthroughError(Exception):
+    """Raised when a provider-owned Responses request fails."""
+
+    status_code = 502
 
 
-class ResponsesPassthroughTransientError(ResponsesPassthroughUnsupportedError):
-    """Raised when passthrough is temporarily unavailable and should fall back."""
+class ResponsesPassthroughUnsupportedError(ResponsesPassthroughError):
+    """Raised when an upstream does not support native /v1/responses."""
 
 
 def _normalize_base_url(llm_base_url: str) -> str:
@@ -230,7 +232,7 @@ def make_responses_request(
         with httpx.Client(timeout=get_request_timeout()) as client:
             response = client.post(url, headers=headers, json=payload)
     except httpx.TransportError as exc:
-        raise ResponsesPassthroughTransientError(
+        raise ResponsesPassthroughError(
             f"Responses passthrough transport failure: {exc}",
         ) from exc
 
@@ -252,21 +254,7 @@ def make_responses_request(
         ) from exc
 
     if response.status_code >= 400:
-        error = result.get("error")
-        if isinstance(error, dict):
-            message = str(error.get("message", ""))
-            error_type = str(error.get("type", ""))
-            unsupported_markers = (
-                "not found",
-                "unsupported",
-                "not supported",
-                "unknown endpoint",
-            )
-            if any(marker in message.lower() for marker in unsupported_markers):
-                raise ResponsesPassthroughUnsupportedError(message)
-            if any(marker in error_type.lower() for marker in unsupported_markers):
-                raise ResponsesPassthroughUnsupportedError(error_type)
-        raise Exception(
+        raise ResponsesPassthroughError(
             f"Responses request error: HTTP {response.status_code} {result}",
         )
 

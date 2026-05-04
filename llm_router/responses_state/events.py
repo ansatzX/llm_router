@@ -12,7 +12,7 @@ def iter_sse_events(
     output_items: list[dict[str, Any]],
     usage: dict[str, Any],
 ) -> Iterator[str]:
-    """Yield a compact Responses SSE sequence compatible with Codex and CCR."""
+    """Yield a compact Responses SSE sequence."""
     created = {
         "type": "response.created",
         "response": {"id": response_id},
@@ -21,10 +21,16 @@ def iter_sse_events(
 
     for idx, item in enumerate(output_items):
         if item.get("type") == "message":
+            added_item = dict(item)
+            added_item["content"] = [
+                {key: value for key, value in content.items() if key != "text"}
+                for content in item.get("content", [])
+                if isinstance(content, dict)
+            ]
             added_event = {
                 "type": "response.output_item.added",
                 "output_index": idx,
-                "item": item,
+                "item": added_item,
             }
             yield f"event: response.output_item.added\ndata: {json.dumps(added_event)}\n\n"
 
@@ -38,20 +44,19 @@ def iter_sse_events(
                     }
                     yield f"event: response.output_text.delta\ndata: {json.dumps(delta_event)}\n\n"
         elif item.get("type") in {"function_call", "custom_tool_call"}:
+            added_item = dict(item)
+            added_item.pop("arguments", None)
+            added_item.pop("input", None)
             added_event = {
                 "type": "response.output_item.added",
                 "output_index": idx,
-                "item": item,
+                "item": added_item,
             }
             yield f"event: response.output_item.added\ndata: {json.dumps(added_event)}\n\n"
 
             arguments_delta = item.get("arguments")
             if item.get("type") == "custom_tool_call":
-                custom_input = item.get("input")
-                arguments_delta = json.dumps(
-                    {"input": custom_input},
-                    ensure_ascii=False,
-                )
+                arguments_delta = item.get("input")
             if arguments_delta:
                 function_event = {
                     "type": "response.function_call_arguments.delta",
