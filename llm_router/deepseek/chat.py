@@ -9,6 +9,7 @@ included in later multi-round requests.
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any
 
 from llm_router.debug_log import log_debug
@@ -37,7 +38,13 @@ class DeepSeekChatAdapter:
         "reasoning_effort",
     }
 
-    def __init__(self) -> None:
+    COMPAT_GATEWAY_REQUEST_PARAMS = {
+        "prompt_cache_key",
+        "prompt_cache_retention",
+    }
+
+    def __init__(self, forward_compat_prompt_cache: bool = False) -> None:
+        self.forward_compat_prompt_cache = forward_compat_prompt_cache
         self.reasoning_by_call_id: dict[str, str] = {}
         self.reasoning_by_message_content: dict[str, str] = {}
 
@@ -80,10 +87,13 @@ class DeepSeekChatAdapter:
     def filter_request_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Keep only request fields DeepSeek's Chat Completion API accepts."""
         reasoning_effort = self._reasoning_effort_from_payload(payload)
+        allowed_params = set(self.CHAT_REQUEST_PARAMS)
+        if self.forward_compat_prompt_cache:
+            allowed_params.update(self.COMPAT_GATEWAY_REQUEST_PARAMS)
         filtered = {
             key: value
             for key, value in payload.items()
-            if key in self.CHAT_REQUEST_PARAMS
+            if key in allowed_params
         }
         if reasoning_effort and "reasoning_effort" not in filtered:
             filtered["reasoning_effort"] = reasoning_effort
@@ -508,6 +518,7 @@ class DeepSeekChatAdapter:
         output_items: list[dict[str, Any]] = []
         if response_text:
             item = {
+                "id": message.get("id") or f"msg_{uuid.uuid4().hex}",
                 "type": "message",
                 "role": "assistant",
                 "content": [{"type": "output_text", "text": response_text}],
