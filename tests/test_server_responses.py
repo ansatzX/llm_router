@@ -1683,7 +1683,6 @@ def test_responses_deepseek_restores_reasoning_from_provider_state_after_restart
     session.provider_state = {
         "deepseek": {
             "reasoning_by_call_id": {"call_ls": "persisted reasoning"},
-            "reasoning_by_message_content": {},
         }
     }
     store.save()
@@ -1758,6 +1757,45 @@ def test_responses_deepseek_provider_state_survives_session_store_reload(
     assert reloaded_session.provider_state["deepseek"]["reasoning_by_call_id"] == {
         "call_reload": "persisted after reload",
     }
+
+
+def test_responses_deepseek_plain_message_reasoning_is_not_content_keyed_sidecar(
+    tmp_path,
+    monkeypatch,
+):
+    """Plain assistant reasoning should stay on the item, not in a text-keyed cache."""
+    client, _ = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": "same visible text",
+                        "reasoning_content": "first private reasoning",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "test-model", "input": "reply with repeated text"},
+    )
+
+    assert response.status_code == 200
+    session = server_mod._sessions.get(response.get_json()["id"])
+    assert session.items[-1]["reasoning_content"] == "first private reasoning"
+    assert session.provider_state["deepseek"] == {"reasoning_by_call_id": {}}
 
 
 def test_responses_does_not_mutate_session_when_upstream_fails(
@@ -2023,6 +2061,121 @@ def test_responses_rejects_unknown_tool_output_before_upstream(
     mock_make_request.assert_not_called()
 
 
+def test_responses_deepseek_ignores_multimodal_input_and_keeps_text(
+    tmp_path,
+    monkeypatch,
+):
+    """DeepSeek policy degrades unsupported images instead of failing the turn."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "describe this"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,abc"},
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = mock_make_request.call_args.args[0]
+    assert payload["messages"] == [{"role": "user", "content": "describe this"}]
+
+
+def test_responses_deepseek_filters_hosted_web_search_tool_before_upstream(
+    tmp_path,
+    monkeypatch,
+):
+    """DeepSeek policy returns a normal empty-result turn without forwarding hosted tools."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": "search the web",
+            "tools": [{"type": "web_search", "external_web_access": False}],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = mock_make_request.call_args.args[0]
+    assert "tools" not in payload
+
+
+def test_responses_generic_chat_does_not_apply_deepseek_unsupported_feature_policy(
+    tmp_path,
+    monkeypatch,
+):
+    """Unsupported-feature policy belongs to the selected provider adapter."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_upstream = "default"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "describe this"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,abc"},
+                    ],
+                }
+            ],
+            "tools": [{"type": "web_search", "external_web_access": False}],
+        },
+    )
+
+    assert response.status_code == 200
+    mock_make_request.assert_called_once()
+
+
 def test_responses_rejects_partial_parallel_tool_outputs_before_upstream(
     tmp_path,
     monkeypatch,
@@ -2123,7 +2276,6 @@ def test_responses_chat_route_wraps_non_function_tools_for_chat_backend(
                     "description": "freeform patch",
                     "format": {"type": "grammar"},
                 },
-                {"type": "web_search", "external_web_access": False},
             ],
         },
     )
@@ -2154,9 +2306,6 @@ def test_responses_chat_route_wraps_non_function_tools_for_chat_backend(
         "required": ["input"],
         "additionalProperties": False,
     }
-    assert payload["tools"][2]["type"] == "function"
-    assert payload["tools"][2]["function"]["name"] == "web_search"
-
 
 def test_responses_chat_route_returns_chat_tool_calls_as_response_items(
     tmp_path,

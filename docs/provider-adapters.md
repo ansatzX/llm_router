@@ -72,7 +72,9 @@ reported.
 
 Bad behavior:
 
-- filtering out `custom` or `web_search` tools just because Chat rejects them
+- filtering out `custom` tools just because Chat rejects them
+- wrapping hosted tools such as `web_search` without preserving hosted-tool
+  execution semantics
 - returning a provider tool call shape that Codex cannot match to its tool
   outputs
 - registering pending tool calls before the full provider response is valid
@@ -80,6 +82,7 @@ Bad behavior:
 Good behavior:
 
 - convert provider-unsupported tools into a provider-accepted shape
+- handle explicitly unsupported hosted tools before provider calls
 - restore Codex-facing output items after the provider response
 - keep stable `call_id` values across call and output
 

@@ -1,7 +1,7 @@
 """DeepSeek Chat Completions compatibility helpers.
 
-DeepSeek's OpenAI-compatible Chat API accepts only ``tools[].type == "function"``
-but Codex sends Responses API tools such as ``custom`` and ``web_search``.
+DeepSeek's OpenAI-compatible Chat API accepts only ``tools[].type == "function"``,
+while Codex can send Responses API tools such as ``custom``.
 DeepSeek thinking mode also requires assistant ``reasoning_content`` to be
 included in later multi-round requests.
 """
@@ -37,6 +37,12 @@ class DeepSeekChatAdapter:
         "thinking",
         "reasoning_effort",
     }
+    HOSTED_TOOL_TYPES = {
+        "web_search",
+        "file_search",
+        "image_generation",
+        "computer_use_preview",
+    }
 
     COMPAT_GATEWAY_REQUEST_PARAMS = {
         "prompt_cache_key",
@@ -46,11 +52,9 @@ class DeepSeekChatAdapter:
     def __init__(self, forward_compat_prompt_cache: bool = False) -> None:
         self.forward_compat_prompt_cache = forward_compat_prompt_cache
         self.reasoning_by_call_id: dict[str, str] = {}
-        self.reasoning_by_message_content: dict[str, str] = {}
 
     def reset(self) -> None:
         self.reasoning_by_call_id.clear()
-        self.reasoning_by_message_content.clear()
 
     def load_provider_state(self, provider_state: dict[str, Any] | None) -> None:
         """Load persisted DeepSeek-private state for one Responses session."""
@@ -58,20 +62,10 @@ class DeepSeekChatAdapter:
         if not isinstance(provider_state, dict):
             return
         reasoning_by_call_id = provider_state.get("reasoning_by_call_id", {})
-        reasoning_by_message_content = provider_state.get(
-            "reasoning_by_message_content",
-            {},
-        )
         if isinstance(reasoning_by_call_id, dict):
             self.reasoning_by_call_id.update({
                 str(key): str(value)
                 for key, value in reasoning_by_call_id.items()
-                if value
-            })
-        if isinstance(reasoning_by_message_content, dict):
-            self.reasoning_by_message_content.update({
-                str(key): str(value)
-                for key, value in reasoning_by_message_content.items()
                 if value
             })
 
@@ -79,9 +73,6 @@ class DeepSeekChatAdapter:
         """Return DeepSeek-private state suitable for session persistence."""
         return {
             "reasoning_by_call_id": dict(self.reasoning_by_call_id),
-            "reasoning_by_message_content": dict(
-                self.reasoning_by_message_content,
-            ),
         }
 
     def filter_request_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -235,12 +226,6 @@ class DeepSeekChatAdapter:
     ) -> dict[str, Any]:
         converted = {"role": role, "content": content}
         reasoning_content = source.get("reasoning_content")
-        if (
-            not reasoning_content
-            and role == "assistant"
-            and content in self.reasoning_by_message_content
-        ):
-            reasoning_content = self.reasoning_by_message_content[content]
         if reasoning_content:
             converted["reasoning_content"] = reasoning_content
         return converted
@@ -428,6 +413,8 @@ class DeepSeekChatAdapter:
         """Convert all Codex Responses tools to DeepSeek Chat function tools."""
         converted = []
         for tool in tools:
+            if tool.get("type") in self.HOSTED_TOOL_TYPES:
+                continue
             if tool.get("type") == "function":
                 converted.append(self.response_tool_to_chat(tool))
                 continue
@@ -525,7 +512,6 @@ class DeepSeekChatAdapter:
             }
             if reasoning_content:
                 item["reasoning_content"] = reasoning_content
-                self.record_message_reasoning(response_text, reasoning_content)
             output_items.append(item)
 
         if native_tool_calls:
@@ -559,14 +545,6 @@ class DeepSeekChatAdapter:
 
         output_text = None if native_tool_calls else response_text
         return output_items, output_text, native_tool_calls
-
-    def record_message_reasoning(
-        self,
-        content: str,
-        reasoning_content: str | None,
-    ) -> None:
-        if content and reasoning_content:
-            self.reasoning_by_message_content[content] = reasoning_content
 
     def record_tool_reasoning(
         self,

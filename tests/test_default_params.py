@@ -3,17 +3,16 @@
 import os
 from unittest.mock import Mock, patch
 
-from llm_router.llm_client import DEFAULT_PARAMS, make_llm_request
+from llm_router.llm_client import make_llm_request
 
 
-def test_default_params_applied_when_missing(mock_llm_response):
-    """Test that default parameters are applied when client doesn't specify them."""
+def test_missing_sampling_params_are_not_injected(mock_llm_response):
+    """Transport must not add provider parameters the client did not request."""
     with patch('llm_router.llm_client._get_client') as mock_get_client:
         mock_client = Mock()
         mock_client.chat.completions.create.return_value = mock_llm_response
         mock_get_client.return_value = mock_client
 
-        # Request without temperature, top_p, etc.
         payload = {
             "model": "test-model",
             "messages": [{"role": "user", "content": "Hello"}]
@@ -21,12 +20,11 @@ def test_default_params_applied_when_missing(mock_llm_response):
 
         make_llm_request(payload, "http://localhost:8000", None)
 
-        # Verify create was called with default params
         call_kwargs = mock_client.chat.completions.create.call_args[1]
 
-        assert call_kwargs["temperature"] == DEFAULT_PARAMS["temperature"]
-        assert call_kwargs["top_p"] == DEFAULT_PARAMS["top_p"]
-        assert call_kwargs["max_tokens"] == DEFAULT_PARAMS["max_tokens"]
+        assert "temperature" not in call_kwargs
+        assert "top_p" not in call_kwargs
+        assert "max_tokens" not in call_kwargs
         assert "extra_body" not in call_kwargs
 
 
@@ -58,28 +56,26 @@ def test_client_params_override_defaults(mock_llm_response):
         assert call_kwargs["extra_body"]["repetition_penalty"] == 1.2
 
 
-def test_partial_client_params_use_defaults(mock_llm_response):
-    """Test that partial client params use defaults for missing ones."""
+def test_partial_client_params_do_not_pull_in_defaults(mock_llm_response):
+    """A supplied provider parameter must not cause unrelated defaults to appear."""
     with patch('llm_router.llm_client._get_client') as mock_get_client:
         mock_client = Mock()
         mock_client.chat.completions.create.return_value = mock_llm_response
         mock_get_client.return_value = mock_client
 
-        # Request with only some parameters
         payload = {
             "model": "test-model",
             "messages": [{"role": "user", "content": "Hello"}],
-            "temperature": 0.7,  # Only temperature specified
+            "temperature": 0.7,
         }
 
         make_llm_request(payload, "http://localhost:8000", None)
 
-        # Verify mixed usage
         call_kwargs = mock_client.chat.completions.create.call_args[1]
 
-        assert call_kwargs["temperature"] == 0.7  # Client value
-        assert call_kwargs["top_p"] == DEFAULT_PARAMS["top_p"]  # Default
-        assert call_kwargs["max_tokens"] == DEFAULT_PARAMS["max_tokens"]  # Default
+        assert call_kwargs["temperature"] == 0.7
+        assert "top_p" not in call_kwargs
+        assert "max_tokens" not in call_kwargs
         assert "extra_body" not in call_kwargs
 
 

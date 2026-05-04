@@ -75,25 +75,6 @@ def _get_env_float(key: str, default: float) -> float:
         return default
 
 
-def _get_env_int(key: str, default: int) -> int:
-    """Safely parse int from environment variable.
-
-    Args:
-        key: Environment variable name.
-        default: Default int value if variable is not set or invalid.
-
-    Returns:
-        Parsed int value from environment or default.
-    """
-    value = os.environ.get(key)
-    if value is None:
-        return default
-    try:
-        return int(value)
-    except ValueError:
-        return default
-
-
 # Standard OpenAI chat completion parameters (whitelist)
 OPENAI_PARAMS: set[str] = {
     "temperature", "top_p", "n", "stream", "stop", "max_tokens",
@@ -101,14 +82,6 @@ OPENAI_PARAMS: set[str] = {
     "logit_bias", "user", "response_format", "seed", "tools", "tool_choice",
     "parallel_tool_calls", "logprobs", "top_logprobs", "reasoning_effort",
     "service_tier",
-}
-
-
-# Default parameter values applied to every backend request.
-DEFAULT_PARAMS: dict[str, float | int] = {
-    "temperature": _get_env_float("DEFAULT_TEMPERATURE", 1.0),
-    "top_p": _get_env_float("DEFAULT_TOP_P", 0.95),
-    "max_tokens": _get_env_int("DEFAULT_MAX_TOKENS", 16384),
 }
 
 
@@ -190,11 +163,7 @@ def make_llm_request(payload: dict[str, Any], llm_base_url: str, api_key: str | 
     client = _get_client(llm_base_url, api_key)
 
     try:
-        # Apply defaults only for missing parameters (efficient merge)
         params = payload.copy()
-        for key, value in DEFAULT_PARAMS.items():
-            if key not in params:
-                params[key] = value
 
         model = params.pop("model", "default")
         messages = params.pop("messages", [])
