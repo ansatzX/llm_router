@@ -61,7 +61,7 @@ where the upstream owns response IDs and continuation state.
 ```mermaid
 flowchart TD
     C[Codex client<br/>OpenAI-style /v1/responses] --> R[llm_router /v1/responses]
-    R --> RESOLVE[Resolve model route<br/>deepseek-* -> type chat<br/>upstream deepseek]
+    R --> RESOLVE[Resolve model route<br/>deepseek-* route<br/>type chat<br/>upstream deepseek]
     RESOLVE --> INGEST[ResponsesStateMachine.ingest_request<br/>normalize input<br/>validate tool outputs<br/>allocate local response_id]
     INGEST --> SESSION[(Local session store<br/>items, pending tool calls,<br/>DeepSeek provider_state)]
     SESSION --> CTX[Build router-owned turn context<br/>recover reasoning_content by call_id<br/>detect Codex collaboration mode]
@@ -81,8 +81,8 @@ flowchart TD
     OUT -->|tool calls| TOOLS[Codex executes local tools]
     TOOLS -->|next turn tool outputs| C
 
-    INGEST -. validation error .-> E1[Client-visible state error<br/>no upstream call<br/>no session advance]
-    DS -. provider error .-> E2[Client-visible provider error<br/>no commit]
+    INGEST -.->|validation error| E1[Client-visible state error<br/>no upstream call<br/>no session advance]
+    DS -.->|provider error| E2[Client-visible provider error<br/>no commit]
 ```
 
 ### Third-Party DeepSeek Responses Passthrough
@@ -98,8 +98,8 @@ flowchart TD
     RESP --> SHAPE[Router response shaping<br/>restore client-facing model<br/>normalize usage<br/>optionally simulate SSE]
     SHAPE --> C
 
-    UP -. provider continuation failure .-> ERR[Client-visible provider error<br/>no fallback to local Chat emulation]
-    R -. official api.deepseek.com matched .-> CHAT[Do not passthrough<br/>use official DeepSeek Chat route]
+    UP -.->|provider continuation failure| ERR[Client-visible provider error<br/>no fallback to local Chat emulation]
+    R -.->|official DeepSeek API matched| CHAT[Do not passthrough<br/>use official DeepSeek Chat route]
 ```
 
 ## Install
