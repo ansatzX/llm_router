@@ -22,7 +22,12 @@ third-party Responses passthrough routes, and MiroThinker MCP-first behavior.
 
 - `llm_router/server.py`: Flask routes and high-level orchestration.
 - `llm_router/config.py`: route matching, upstream selection, and model rewrite.
-- `llm_router/responses_state/`: local Responses state machine.
+- `llm_router/codex_recovery.py`: narrow Codex compatibility recovery and
+  request/response diagnostics helpers.
+- `llm_router/provider_errors.py`: provider error mapping for client-visible
+  router responses.
+- `llm_router/responses_state/`: local Responses state machine, SSE event
+  construction, Responses tool normalization, and usage normalization.
 - `llm_router/session_store.py`: JSON-backed persistent session storage.
 - `llm_router/deepseek/`: DeepSeek official Chat adapter.
 - `llm_router/mirothinker/`: MiroThinker MCP-first adapter.
@@ -30,8 +35,10 @@ third-party Responses passthrough routes, and MiroThinker MCP-first behavior.
 - `llm_router/llm_client.py`: transport wrapper around the OpenAI Python SDK.
 - `llm_router/debug_log.py`: structured JSONL diagnostics.
 
-`server.py` may coordinate these pieces, but provider-specific compatibility
-belongs in provider adapters.
+`server.py` coordinates these pieces through small private orchestration
+helpers. Provider-specific compatibility belongs in provider adapters, while
+Codex client-policy recovery stays limited to the documented helpers in
+`codex_recovery.py`.
 
 ## Request Flow
 
@@ -39,9 +46,11 @@ belongs in provider adapters.
 Codex /v1/responses request
   -> route resolution from model
   -> ResponsesStateMachine.ingest_request()
+  -> Codex compatibility diagnostics/recovery context
   -> provider adapter filters and converts payload
   -> upstream Chat API
   -> provider adapter parses response
+  -> narrow Codex recovery retry if needed
   -> ResponsesStateMachine.commit_response()
   -> JSON or Responses SSE returned to Codex
 ```

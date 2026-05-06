@@ -18,8 +18,18 @@ Avoid tests that only lock in incidental helper structure.
 
 ## Main Test Files
 
-- `tests/test_server_responses.py`: primary `/v1/responses` integration
-  regressions.
+- `tests/test_server_responses.py`: aggregate entrypoint for the split
+  `/v1/responses` regression suite. Keep this file so the focused command in
+  docs and agent instructions continues to work.
+- `tests/responses/basic_flow.py`: basic Responses continuation and output
+  shape.
+- `tests/responses/routing_and_passthrough.py`: routing, model rewrites,
+  passthrough, and memory workload detection.
+- `tests/responses/plan_mode.py`: Codex Plan-mode diagnostics and recovery.
+- `tests/responses/state_and_deepseek.py`: session mutation, DeepSeek provider
+  sidecars, and thinking-mode replay behavior.
+- `tests/responses/validation_and_tools.py`: tool-output validation,
+  unsupported tool handling, streaming SSE shape, and MCP-first routing.
 - `tests/test_deepseek_adapter.py`: DeepSeek request/response adapter behavior.
 - `tests/test_mirothinker_adapter.py`: MiroThinker MCP-first behavior.
 - `tests/test_config.py`: routing and upstream model rewrite behavior.
@@ -43,6 +53,7 @@ Run focused files:
 
 ```bash
 uv run python -m pytest tests/test_server_responses.py -q
+uv run python -m pytest tests/responses/plan_mode.py -q
 uv run python -m pytest tests/test_deepseek_adapter.py -q
 ```
 
@@ -88,3 +99,7 @@ Weak examples:
 - testing that a helper returns a dict without checking behavior
 - asserting exact internal ordering where the protocol does not require it
 - adding a snapshot that hides the real compatibility rule
+
+The aggregate `tests/test_server_responses.py` is intentionally a compatibility
+entrypoint, not a separate behavioral test file. Add new Responses cases to the
+split modules under `tests/responses/`.

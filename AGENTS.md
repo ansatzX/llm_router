@@ -42,8 +42,12 @@ then adapt the provider boundary.
 - `llm_router/server.py`: HTTP entrypoint and request orchestration. Keep this
   thin; do not hide provider quirks here when an adapter can own them.
 - `llm_router/config.py`: model routing, route type, upstream model rewrite.
+- `llm_router/codex_recovery.py`: narrow Codex compatibility recovery, such as
+  Plan-mode retry steering and diagnostics helpers.
+- `llm_router/provider_errors.py`: client-visible provider error mapping.
 - `llm_router/responses_state/`: response IDs, input normalization, pending
-  tool validation, SSE event construction.
+  tool validation, SSE event construction, Responses tool normalization, and
+  usage normalization.
 - `llm_router/session_store.py`: persisted Responses session state.
 - `llm_router/deepseek/`: DeepSeek official Chat API adapter.
 - `llm_router/mirothinker/`: MiroThinker MCP-first adapter.
@@ -196,7 +200,8 @@ uv run ruff check .
 For provider work, add tests near the behavior:
 
 - adapter-local conversion tests in provider-specific test files
-- `/v1/responses` tests in `tests/test_server_responses.py`
+- `/v1/responses` tests under `tests/responses/`, with
+  `tests/test_server_responses.py` kept as the focused aggregate entrypoint
 - state persistence tests when provider sidecars are involved
 - streaming event-order tests before enabling upstream streaming
 
@@ -214,8 +219,10 @@ consume upstream quota.
 - `uv run llm-router serve` starts the router.
 - `uv run llm-router serve --debug` writes JSONL diagnostics to
   `llm_router.jsonl`.
-- `uv run python -m pytest tests/test_server_responses.py -q` runs the main
-  Responses regression file.
+- `uv run python -m pytest tests/test_server_responses.py -q` runs the split
+  Responses regression suite through its aggregate entrypoint.
+- `uv run python -m pytest tests/responses -q` runs the split Responses modules
+  directly.
 - `uv run python -m pytest tests/test_deepseek_adapter.py -q` runs DeepSeek
   adapter regressions.
 

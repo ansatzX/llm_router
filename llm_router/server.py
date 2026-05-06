@@ -7,18 +7,27 @@ Routes:
   /health, /liveness, /readiness, /metrics — Health probes
 """
 
-import json
 import logging
 import os
-import re
 import time
 import uuid
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 from flask import Flask, Response, jsonify, request, stream_with_context
 
+from llm_router.codex_recovery import (
+    _append_plan_mode_proposed_plan_feedback,
+    _append_plan_mode_retry_feedback,
+    _extract_collaboration_mode,
+    _plan_mode_mutation_violation,
+    _plan_mode_should_retry_with_request_user_input,
+    _responses_request_diagnostics,
+    _responses_response_diagnostics,
+    _validate_plan_mode_output_items,
+)
 from llm_router.config import RouterConfig
 from llm_router.debug_log import log_debug
 from llm_router.deepseek import DeepSeekChatAdapter
@@ -33,16 +42,21 @@ from llm_router.llm_client import (
 )
 from llm_router.mirothinker import MiroThinkerMCPAdapter
 from llm_router.openai_chat import OpenAIChatAdapter
+from llm_router.provider_errors import _llm_request_error_body
 from llm_router.responses_state import (
     ResponsesStateError,
     ResponsesStateMachine,
+    ResponsesTurn,
     iter_sse_events,
 )
+from llm_router.responses_state.tools import (
+    _normalize_responses_tools,
+    convert_responses_tool_to_chat,
+)
+from llm_router.responses_state.usage import _responses_usage_from_provider
 from llm_router.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
-
-# ── Globals (set on app creation) ───────────────────────────────────────────
 
 _config: RouterConfig | None = None
 _sessions: SessionStore | None = None
@@ -61,6 +75,35 @@ _MEMORY_PROMPT_MARKERS = (
     "## Memory Writing Agent: Phase 2 (Consolidation)",
     "Consolidate Codex memories in:",
 )
+
+
+@dataclass
+class _ResponsesTurnContext:
+    state_machine: ResponsesStateMachine
+    turn: ResponsesTurn
+    model_type: str
+    upstream_name: str
+    base_url: str
+    api_key: str
+    upstream_model: str
+    is_deepseek: bool
+    chat_adapter: DeepSeekChatAdapter
+    tool_type_map: dict[str, str]
+    inject_mcp: bool
+    messages: list[dict[str, Any]]
+    collaboration_mode: str | None
+
+
+@dataclass
+class _ResponsesProviderResult:
+    llm_response: dict[str, Any]
+    parse_result: Any
+    retry_count: int
+    response_message: dict[str, Any]
+    output_items: list[dict[str, Any]]
+    output_text: str | None
+    tool_calls_list: list[dict[str, Any]]
+    usage: dict[str, Any]
 
 
 def create_app(config_path: str | None = None) -> Flask:
@@ -168,102 +211,6 @@ def _chat_adapter_for(upstream_name: str, base_url: str) -> DeepSeekChatAdapter:
     return OpenAIChatAdapter()
 
 
-def _int_or_zero(value: Any) -> int:
-    if isinstance(value, bool):
-        return int(value)
-    if isinstance(value, int):
-        return value
-    if isinstance(value, float):
-        return int(value)
-    return 0
-
-
-def _extract_cached_input_tokens(raw_usage: dict[str, Any]) -> int:
-    for details_key in ("input_tokens_details", "prompt_tokens_details"):
-        details = raw_usage.get(details_key)
-        if isinstance(details, dict):
-            cached_tokens = details.get("cached_tokens")
-            if cached_tokens is not None:
-                return _int_or_zero(cached_tokens)
-
-    for usage_key in ("prompt_cache_hit_tokens", "cached_input_tokens"):
-        cached_tokens = raw_usage.get(usage_key)
-        if cached_tokens is not None:
-            return _int_or_zero(cached_tokens)
-
-    return 0
-
-
-def _extract_reasoning_tokens(raw_usage: dict[str, Any]) -> int:
-    details = raw_usage.get("output_tokens_details")
-    if isinstance(details, dict):
-        reasoning_tokens = details.get("reasoning_tokens")
-        if reasoning_tokens is not None:
-            return _int_or_zero(reasoning_tokens)
-
-    for usage_key in ("reasoning_tokens", "reasoning_output_tokens"):
-        reasoning_tokens = raw_usage.get(usage_key)
-        if reasoning_tokens is not None:
-            return _int_or_zero(reasoning_tokens)
-
-    return 0
-
-
-def _responses_usage_from_provider(raw_usage: dict[str, Any]) -> dict[str, Any]:
-    input_tokens = _int_or_zero(
-        raw_usage.get("input_tokens", raw_usage.get("prompt_tokens", 0)),
-    )
-    output_tokens = _int_or_zero(
-        raw_usage.get("output_tokens", raw_usage.get("completion_tokens", 0)),
-    )
-    total_tokens = _int_or_zero(
-        raw_usage.get("total_tokens", input_tokens + output_tokens),
-    )
-
-    return {
-        "input_tokens": input_tokens,
-        "input_tokens_details": {
-            "cached_tokens": _extract_cached_input_tokens(raw_usage),
-        },
-        "output_tokens": output_tokens,
-        "output_tokens_details": {
-            "reasoning_tokens": _extract_reasoning_tokens(raw_usage),
-        },
-        "total_tokens": total_tokens,
-    }
-
-
-def _extract_mode_markers(content: str) -> list[str]:
-    """Extract collaboration-mode names from one text blob in source order."""
-    return [
-        match.group("collab") or match.group("simple")
-        for match in re.finditer(
-            r"# Collaboration Mode:\s*(?P<collab>\w+)|# (?P<simple>Plan|Default) Mode\b",
-            content,
-        )
-    ]
-
-
-def _extract_collaboration_mode(
-    messages: list[dict[str, Any]],
-    instructions: str = "",
-) -> str | None:
-    """Find the active collaboration mode, preferring current-turn instructions."""
-    if isinstance(instructions, str) and instructions:
-        instruction_modes = _extract_mode_markers(instructions)
-        if instruction_modes:
-            return instruction_modes[-1]
-
-    for message in reversed(messages):
-        content = message.get("content")
-        if not isinstance(content, str):
-            continue
-        modes = _extract_mode_markers(content)
-        if modes:
-            return modes[-1]
-    return None
-
-
 def _apply_provider_defaults(payload: dict[str, Any], model_type: str) -> dict[str, Any]:
     """Apply provider-specific defaults after adapter filtering."""
     if model_type == "mcp_first" and "repetition_penalty" not in payload:
@@ -272,285 +219,6 @@ def _apply_provider_defaults(payload: dict[str, Any], model_type: str) -> dict[s
             1.05,
         )
     return payload
-
-
-def _command_looks_like_plan_execution(command: str) -> bool:
-    """Detect obvious Plan-mode execution attempts without classifying all shell commands."""
-    normalized = command.strip().lower()
-    execution_markers = (
-        "mkdir ",
-        "touch ",
-        "cp ",
-        "mv ",
-        "rm ",
-        "git init",
-        "uv pip install",
-        "pip install",
-        "python -m pip install",
-        "python3 -m pip install",
-        "npm install",
-        "pnpm add",
-        "yarn add",
-        "poetry add",
-        "cargo add",
-        "conda install",
-        "brew install",
-        "apt install",
-        "apt-get install",
-        "uv venv",
-        "python -m venv",
-        "python3 -m venv",
-    )
-    return (
-        ">" in normalized
-        or ">>" in normalized
-        or any(marker in normalized for marker in execution_markers)
-    )
-
-
-def _plan_mode_mutation_violation(
-    collaboration_mode: str | None,
-    output_items: list[dict[str, Any]],
-) -> str | None:
-    """Describe Plan-mode mutation violations, if any."""
-    if collaboration_mode != "Plan":
-        return None
-
-    for item in output_items:
-        item_type = item.get("type")
-        if item_type == "custom_tool_call":
-            return "Plan mode forbids mutating tool calls such as apply_patch."
-        if item_type != "function_call":
-            continue
-        name = item.get("name")
-        if name == "apply_patch":
-            return "Plan mode forbids mutating tool calls such as apply_patch."
-        if name != "exec_command":
-            continue
-        arguments = item.get("arguments")
-        if not isinstance(arguments, str):
-            continue
-        try:
-            parsed = json.loads(arguments)
-        except json.JSONDecodeError:
-            continue
-        command = parsed.get("cmd")
-        if isinstance(command, str) and _command_looks_like_plan_execution(command):
-            return "Plan mode forbids mutating exec_command calls."
-    return None
-
-
-def _validate_plan_mode_output_items(
-    collaboration_mode: str | None,
-    output_items: list[dict[str, Any]],
-) -> None:
-    """Reject tool calls that obviously violate Plan mode's non-mutation rule."""
-    violation = _plan_mode_mutation_violation(collaboration_mode, output_items)
-    if violation:
-        raise ResponsesStateError(violation, "plan_mode_violation")
-
-
-def _looks_like_plaintext_clarifying_question(text: str) -> bool:
-    """Heuristic for Plan-mode prompts that should have used request_user_input."""
-    normalized = text.strip()
-    if not normalized:
-        return False
-    if normalized.endswith(("?", "？", ":", "：")):
-        return True
-    question_markers = (
-        "第一个问题",
-        "第二个问题",
-        "第三个问题",
-        "下一个问题",
-        "接下来我需要",
-        "我需要搞清",
-    )
-    return any(marker in normalized for marker in question_markers)
-
-
-def _plan_mode_should_retry_with_request_user_input(
-    collaboration_mode: str | None,
-    output_items: list[dict[str, Any]],
-    response_message: dict[str, Any],
-) -> bool:
-    """Detect Plan-mode plain-text questioning that should be retried via tool call."""
-    if collaboration_mode != "Plan":
-        return False
-    if response_message.get("tool_calls"):
-        return False
-    if [item.get("type") for item in output_items] != ["message"]:
-        return False
-    content = response_message.get("content")
-    if not isinstance(content, str):
-        return False
-    return _looks_like_plaintext_clarifying_question(content)
-
-
-def _append_plan_mode_retry_feedback(
-    payload: dict[str, Any],
-    response_message: dict[str, Any],
-) -> None:
-    """Append one corrective retry turn asking the model to use request_user_input."""
-    content = response_message.get("content", "")
-    if content:
-        payload.setdefault("messages", []).append({
-            "role": "assistant",
-            "content": content,
-        })
-    payload.setdefault("messages", []).append({
-        "role": "user",
-        "content": (
-            "In Plan mode, clarifying questions must use the request_user_input tool "
-            "instead of plain assistant text. Re-emit your latest question as exactly "
-            "one request_user_input tool call."
-        ),
-    })
-
-
-def _append_plan_mode_proposed_plan_feedback(
-    payload: dict[str, Any],
-    response_message: dict[str, Any],
-) -> None:
-    """Append one corrective retry turn asking the model to emit proposed_plan."""
-    content = response_message.get("content", "")
-    if content:
-        payload.setdefault("messages", []).append({
-            "role": "assistant",
-            "content": content,
-        })
-    payload.setdefault("messages", []).append({
-        "role": "user",
-        "content": (
-            "You are still in Plan mode. Do not write files, create directories, or "
-            "call mutating tools. If the design is decision complete, emit the final "
-            "approved plan as exactly one <proposed_plan>...</proposed_plan> block so "
-            "the client can exit Plan mode and start execution. Otherwise continue "
-            "planning with non-mutating actions only."
-        ),
-    })
-
-
-def _responses_request_diagnostics(
-    data: dict[str, Any],
-    messages: list[dict[str, Any]],
-    model: str,
-    model_type: str,
-    upstream_name: str,
-) -> dict[str, Any]:
-    """Summarize request state that helps debug mode/tool-call behavior."""
-    collaboration_mode = _extract_collaboration_mode(
-        messages,
-        data.get("instructions", ""),
-    )
-    request_user_input_available = None
-    if collaboration_mode == "Plan":
-        request_user_input_available = True
-    elif collaboration_mode == "Default":
-        request_user_input_available = False
-
-    tool_names = [
-        tool.get("name", tool.get("type", "unknown"))
-        for tool in data.get("tools", [])
-        if isinstance(tool, dict)
-    ]
-    return {
-        "endpoint": "/v1/responses",
-        "model": model,
-        "model_type": model_type,
-        "upstream": upstream_name,
-        "collaboration_mode": collaboration_mode,
-        "request_user_input_available": request_user_input_available,
-        "has_previous_response_id": bool(data.get("previous_response_id")),
-        "input_message_count": len(messages),
-        "tool_count": len(tool_names),
-        "tool_names": tool_names,
-    }
-
-
-def _responses_response_diagnostics(
-    llm_response: dict[str, Any],
-    output_items: list[dict[str, Any]],
-) -> dict[str, Any]:
-    """Summarize provider response shape for debugging router decisions."""
-    choice = llm_response.get("choices", [{}])[0]
-    message = choice.get("message", {})
-    tool_calls = message.get("tool_calls") or []
-    return {
-        "finish_reason": choice.get("finish_reason"),
-        "has_tool_calls": bool(tool_calls),
-        "tool_call_names": [
-            tool_call.get("function", {}).get("name")
-            for tool_call in tool_calls
-            if isinstance(tool_call, dict)
-        ],
-        "output_item_types": [item.get("type") for item in output_items],
-    }
-
-
-def _deepseek_missing_reasoning_tool_call_ids(
-    payload: dict[str, Any] | None,
-) -> list[str]:
-    if not isinstance(payload, dict):
-        return []
-
-    missing: list[str] = []
-    for message in payload.get("messages", []) or []:
-        if not isinstance(message, dict):
-            continue
-        tool_calls = message.get("tool_calls") or []
-        if (
-            message.get("role") != "assistant"
-            or not isinstance(tool_calls, list)
-            or message.get("reasoning_content")
-        ):
-            continue
-        for tool_call in tool_calls:
-            if isinstance(tool_call, dict) and isinstance(tool_call.get("id"), str):
-                missing.append(tool_call["id"])
-    return missing
-
-
-def _is_deepseek_missing_reasoning_error(error: LLMRequestError) -> bool:
-    message = error.message.lower()
-    return "reasoning_content" in message and "thinking mode" in message
-
-
-def _llm_request_error_body(
-    error: LLMRequestError,
-    *,
-    payload: dict[str, Any] | None = None,
-    is_deepseek: bool = False,
-) -> tuple[dict[str, Any], int]:
-    if is_deepseek and _is_deepseek_missing_reasoning_error(error):
-        missing_call_ids = _deepseek_missing_reasoning_tool_call_ids(payload)
-        message = (
-            "DeepSeek rejected this continuation because thinking-mode tool "
-            "replay requires the original provider reasoning_content."
-        )
-        if missing_call_ids:
-            message += (
-                " Missing reasoning_content for tool call(s): "
-                f"{', '.join(missing_call_ids)}."
-            )
-        message += f" Provider message: {error.message}"
-        return {
-            "error": {
-                "type": "invalid_request_error",
-                "code": "deepseek_missing_reasoning_content",
-                "message": message,
-                "provider_status": error.status_code,
-            }
-        }, 409
-
-    status_code = error.status_code if 400 <= error.status_code < 500 else 502
-    return {
-        "error": {
-            "type": "provider_error",
-            "code": "provider_error",
-            "message": error.message,
-            "provider_status": error.status_code,
-        }
-    }, status_code
 
 
 def _tool_call_ids_from_response_items(items: list[dict[str, Any]]) -> set[str]:
@@ -582,57 +250,6 @@ def _merge_deepseek_provider_states(
     return {"reasoning_by_call_id": merged}
 
 
-def convert_chat_tool_to_responses(tool: dict[str, Any]) -> dict[str, Any]:
-    """Convert Chat Completions tool format → Responses API format.
-
-    Chat: {"type": "function", "function": {"name": ..., "parameters": ...}}
-    Responses: {"type": "function", "name": ..., "parameters": ...}
-    """
-    if tool.get("type") == "function":
-        if "function" in tool:
-            func = tool["function"]
-            parameters = func.get("parameters")
-            if parameters is None:
-                parameters = func.get("input_schema", {})
-            return {
-                "type": "function",
-                "name": func.get("name", ""),
-                "description": func.get("description", ""),
-                "parameters": parameters,
-            }
-        elif "name" in tool:
-            normalized = dict(tool)
-            if "parameters" not in normalized and "input_schema" in normalized:
-                normalized["parameters"] = normalized["input_schema"]
-            normalized.pop("input_schema", None)
-            return normalized
-    return tool
-
-
-def convert_responses_tool_to_chat(tool: dict[str, Any]) -> dict[str, Any]:
-    """Convert Responses API function tool format to Chat Completions format."""
-    return _deepseek_adapter.response_tool_to_chat(tool)
-
-
-def _normalize_responses_tools(
-    tools: list[dict[str, Any]] | None,
-) -> list[dict[str, Any]]:
-    """Normalize mixed tool schema aliases to the Responses function shape."""
-    if not isinstance(tools, list):
-        return []
-    return [
-        convert_chat_tool_to_responses(tool)
-        for tool in tools
-        if isinstance(tool, dict)
-    ]
-
-
-# ── Tool / Rollback Helpers ────────────────────────────────────────────────
-
-
-# ── SSE Helpers ─────────────────────────────────────────────────────────────
-
-
 def _build_sse_response(
     response_id: str,
     output_items: list[dict[str, Any]],
@@ -644,9 +261,6 @@ def _build_sse_response(
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
-# ── Core LLM Logic (shared by both endpoints) ─────────────────────────────
 
 
 def _run_llm_with_rollback(
@@ -724,7 +338,339 @@ def _run_llm_with_rollback(
     return llm_response, parse_result, retry_count, response_text
 
 
-# ── Endpoints ───────────────────────────────────────────────────────────────
+def _handle_responses_passthrough(
+    data: dict[str, Any],
+    model: str,
+    model_type: str,
+    upstream_name: str,
+    base_url: str,
+    api_key: str,
+    upstream_model: str,
+    tools_raw: list[dict[str, Any]],
+    normalized_tools: list[dict[str, Any]],
+    client_requested_stream: bool,
+) -> tuple[Any, int]:
+    passthrough_payload = dict(data)
+    passthrough_payload["model"] = upstream_model
+    passthrough_payload["stream"] = False
+    if tools_raw:
+        passthrough_payload["tools"] = normalized_tools
+    try:
+        passthrough_response = make_responses_request(
+            passthrough_payload,
+            base_url,
+            api_key,
+        )
+    except ResponsesPassthroughError as exc:
+        log_debug("RESPONSES_PASSTHROUGH_ERROR", {
+            "model": model,
+            "upstream": upstream_name,
+            "error": str(exc),
+        })
+        return jsonify({
+            "error": {
+                "type": "provider_error",
+                "message": str(exc),
+            },
+        }), exc.status_code
+    except Exception as exc:
+        log_debug("RESPONSES_PASSTHROUGH_ERROR", {
+            "model": model,
+            "upstream": upstream_name,
+            "error": str(exc),
+        })
+        return jsonify({
+            "error": {
+                "type": "provider_error",
+                "message": str(exc),
+            },
+        }), 502
+
+    response = dict(passthrough_response)
+    response["model"] = model
+    usage = _responses_usage_from_provider(response.get("usage", {}))
+    response["usage"] = usage
+    log_debug("CLIENT_RESPONSE /v1/responses", {
+        "status": "passthrough_success",
+        "model": model,
+        "model_type": model_type,
+        "upstream": upstream_name,
+        "usage": usage,
+    })
+    if client_requested_stream:
+        return _build_sse_response(
+            response["id"],
+            response.get("output", []),
+            usage,
+        )
+    return jsonify(response), 200
+
+
+def _load_deepseek_provider_state(
+    turn: ResponsesTurn,
+    chat_adapter: DeepSeekChatAdapter,
+) -> None:
+    call_ids = _tool_call_ids_from_response_items(
+        [*turn.session.items, *turn.input_items],
+    )
+    recovered_provider_state = _sessions.provider_state_for_call_ids(
+        "deepseek",
+        call_ids,
+    )
+    session_provider_state = turn.session.provider_state.get("deepseek")
+    chat_adapter.load_provider_state(
+        _merge_deepseek_provider_states(
+            recovered_provider_state,
+            session_provider_state,
+        ),
+    )
+    recovered_call_ids = sorted(
+        set(
+            recovered_provider_state.get(
+                "reasoning_by_call_id",
+                {},
+            )
+        )
+    )
+    if recovered_call_ids:
+        log_debug("DEEPSEEK_PROVIDER_STATE_RECOVERY", {
+            "recovered_call_ids": recovered_call_ids,
+            "session_had_provider_state": bool(session_provider_state),
+        })
+
+
+def _prepare_router_owned_responses_context(
+    data: dict[str, Any],
+    model: str,
+    instructions: str,
+    tools_raw: list[dict[str, Any]],
+) -> _ResponsesTurnContext:
+    state_machine = ResponsesStateMachine(_sessions)
+    turn = state_machine.ingest_request(data, model)
+    provisional_adapter = OpenAIChatAdapter()
+    messages = turn.to_chat_messages(provisional_adapter.flatten_response_items)
+    model_type, upstream_name, base_url, api_key, upstream_model = _resolve(
+        model,
+        data,
+        messages,
+    )
+    is_deepseek = _is_deepseek_upstream(upstream_name, base_url)
+    chat_adapter = _chat_adapter_for(upstream_name, base_url)
+    tool_type_map = chat_adapter.tool_type_map(tools_raw)
+    inject_mcp = (model_type == "mcp_first")
+    if is_deepseek:
+        _load_deepseek_provider_state(turn, chat_adapter)
+
+    messages = turn.to_chat_messages(chat_adapter.flatten_response_items)
+    if instructions:
+        messages.insert(0, {"role": "system", "content": instructions})
+    collaboration_mode = _extract_collaboration_mode(messages, instructions)
+    log_debug(
+        "RESPONSES_REQUEST_DIAGNOSTICS",
+        _responses_request_diagnostics(
+            data,
+            messages,
+            model,
+            model_type,
+            upstream_name,
+        ),
+    )
+    return _ResponsesTurnContext(
+        state_machine=state_machine,
+        turn=turn,
+        model_type=model_type,
+        upstream_name=upstream_name,
+        base_url=base_url,
+        api_key=api_key,
+        upstream_model=upstream_model,
+        is_deepseek=is_deepseek,
+        chat_adapter=chat_adapter,
+        tool_type_map=tool_type_map,
+        inject_mcp=inject_mcp,
+        messages=messages,
+        collaboration_mode=collaboration_mode,
+    )
+
+
+def _build_responses_chat_payload(
+    data: dict[str, Any],
+    context: _ResponsesTurnContext,
+    tools_raw: list[dict[str, Any]],
+) -> dict[str, Any]:
+    payload = {
+        k: v for k, v in data.items()
+        if k not in ("messages", "tools", "input", "instructions",
+                     "previous_response_id", "stream", "store", "include")
+    }
+    payload["model"] = context.upstream_model
+    payload["messages"] = context.messages
+    payload["stream"] = False  # Always non-streaming internally
+    if tools_raw and not context.inject_mcp:
+        chat_tools = (
+            context.chat_adapter.responses_tools_to_chat(tools_raw)
+            if context.is_deepseek
+            else [convert_responses_tool_to_chat(t) for t in tools_raw]
+        )
+        if chat_tools:
+            payload["tools"] = chat_tools
+    payload = context.chat_adapter.filter_request_payload(payload)
+    return _apply_provider_defaults(payload, context.model_type)
+
+
+def _responses_provider_result_from_llm(
+    context: _ResponsesTurnContext,
+    llm_response: dict[str, Any],
+    parse_result: Any,
+    retry_count: int,
+) -> _ResponsesProviderResult:
+    choice = llm_response.get("choices", [{}])[0]
+    response_message = choice.get("message", {})
+    output_items, output_text, native_tool_calls = (
+        context.chat_adapter.chat_response_to_output_items(
+            response_message,
+            context.tool_type_map,
+        )
+    )
+
+    usage = _responses_usage_from_provider(llm_response.get("usage", {}))
+    tool_calls_list = []
+    if context.inject_mcp and parse_result and parse_result.success:
+        output_items, tool_calls_list = (
+            _mirothinker_adapter.to_responses_tool_outputs(
+                parse_result,
+            )
+        )
+    elif native_tool_calls:
+        tool_calls_list = native_tool_calls
+
+    return _ResponsesProviderResult(
+        llm_response=llm_response,
+        parse_result=parse_result,
+        retry_count=retry_count,
+        response_message=response_message,
+        output_items=output_items,
+        output_text=output_text,
+        tool_calls_list=tool_calls_list,
+        usage=usage,
+    )
+
+
+def _retry_plan_mode_recoveries(
+    context: _ResponsesTurnContext,
+    payload: dict[str, Any],
+    result: _ResponsesProviderResult,
+    model: str,
+) -> _ResponsesProviderResult:
+    plan_mode_mutation = _plan_mode_mutation_violation(
+        context.collaboration_mode,
+        result.output_items,
+    )
+    if plan_mode_mutation:
+        log_debug("PLAN_MODE_PROPOSED_PLAN_RETRY", {
+            "model": model,
+            "upstream": context.upstream_name,
+            "violation": plan_mode_mutation,
+            "response_preview": (result.response_message.get("content") or "")[:240],
+        })
+        _append_plan_mode_proposed_plan_feedback(
+            payload,
+            result.response_message,
+        )
+        result = _responses_provider_result_from_llm(
+            context,
+            make_llm_request(payload, context.base_url, context.api_key),
+            None,
+            result.retry_count,
+        )
+
+    _validate_plan_mode_output_items(
+        context.collaboration_mode,
+        result.output_items,
+    )
+
+    if _plan_mode_should_retry_with_request_user_input(
+        context.collaboration_mode,
+        result.output_items,
+        result.response_message,
+    ):
+        log_debug("PLAN_MODE_REQUEST_USER_INPUT_RETRY", {
+            "model": model,
+            "upstream": context.upstream_name,
+            "response_preview": result.response_message.get("content", "")[:240],
+        })
+        _append_plan_mode_retry_feedback(payload, result.response_message)
+        result = _responses_provider_result_from_llm(
+            context,
+            make_llm_request(payload, context.base_url, context.api_key),
+            None,
+            result.retry_count,
+        )
+        _validate_plan_mode_output_items(
+            context.collaboration_mode,
+            result.output_items,
+        )
+
+    return result
+
+
+def _commit_and_build_responses_body(
+    context: _ResponsesTurnContext,
+    result: _ResponsesProviderResult,
+    model: str,
+) -> dict[str, Any]:
+    has_tool_output = bool(result.tool_calls_list)
+    output_text = None if has_tool_output else result.output_text
+    provider_state_updates = (
+        {"deepseek": context.chat_adapter.dump_provider_state()}
+        if context.is_deepseek
+        else None
+    )
+    log_debug(
+        "RESPONSES_RESPONSE_DIAGNOSTICS",
+        _responses_response_diagnostics(
+            result.llm_response,
+            result.output_items,
+        ),
+    )
+    context.state_machine.commit_response(
+        context.turn,
+        result.output_items,
+        provider_state_updates,
+    )
+
+    response = {
+        "id": context.turn.response_id,
+        "object": "response",
+        "created": result.llm_response.get("created", int(time.time())),
+        "model": model,
+        "output": result.output_items,
+        "output_text": output_text,
+        "usage": result.usage,
+        "status": "completed",
+    }
+    if result.retry_count > 0:
+        response["_metadata"] = {
+            "rollback_attempts": result.retry_count,
+            "rollback_success": bool(
+                context.inject_mcp
+                and result.parse_result
+                and result.parse_result.success
+            ),
+        }
+    if result.tool_calls_list:
+        response["tool_calls"] = result.tool_calls_list
+
+    log_debug("CLIENT_RESPONSE /v1/responses", {
+        "status": "success",
+        "model": model,
+        "model_type": context.model_type,
+        "has_tool_calls": bool(result.tool_calls_list),
+        "tool_calls_count": len(result.tool_calls_list),
+        "rollback_attempts": result.retry_count if result.retry_count else None,
+        "session_items": len(context.turn.session.items),
+        "usage": result.usage,
+    })
+    return response
 
 
 @app.route("/v1/responses", methods=["POST"])
@@ -761,264 +707,57 @@ def responses_api() -> tuple[Any, int]:
             model_type == "responses_passthrough"
             and not _is_official_deepseek_base_url(base_url)
         ):
-            passthrough_payload = dict(data)
-            passthrough_payload["model"] = upstream_model
-            passthrough_payload["stream"] = False
-            if tools_raw:
-                passthrough_payload["tools"] = normalized_tools
-            try:
-                passthrough_response = make_responses_request(
-                    passthrough_payload,
-                    base_url,
-                    api_key,
-                )
-            except ResponsesPassthroughError as exc:
-                log_debug("RESPONSES_PASSTHROUGH_ERROR", {
-                    "model": model,
-                    "upstream": upstream_name,
-                    "error": str(exc),
-                })
-                return jsonify({
-                    "error": {
-                        "type": "provider_error",
-                        "message": str(exc),
-                    },
-                }), exc.status_code
-            except Exception as exc:
-                log_debug("RESPONSES_PASSTHROUGH_ERROR", {
-                    "model": model,
-                    "upstream": upstream_name,
-                    "error": str(exc),
-                })
-                return jsonify({
-                    "error": {
-                        "type": "provider_error",
-                        "message": str(exc),
-                    },
-                }), 502
-
-            response = dict(passthrough_response)
-            response["model"] = model
-            usage = _responses_usage_from_provider(response.get("usage", {}))
-            response["usage"] = usage
-            log_debug("CLIENT_RESPONSE /v1/responses", {
-                "status": "passthrough_success",
-                "model": model,
-                "model_type": model_type,
-                "upstream": upstream_name,
-                "usage": usage,
-            })
-            if client_requested_stream:
-                return _build_sse_response(
-                    response["id"],
-                    response.get("output", []),
-                    usage,
-                )
-            return jsonify(response), 200
-
-        state_machine = ResponsesStateMachine(_sessions)
-        turn = state_machine.ingest_request(data, model)
-        provisional_adapter = OpenAIChatAdapter()
-        messages = turn.to_chat_messages(provisional_adapter.flatten_response_items)
-        model_type, upstream_name, base_url, api_key, upstream_model = _resolve(model, data, messages)
-        is_deepseek = _is_deepseek_upstream(upstream_name, base_url)
-        chat_adapter = _chat_adapter_for(upstream_name, base_url)
-        tool_type_map = chat_adapter.tool_type_map(tools_raw)
-        inject_mcp = (model_type == "mcp_first")
-        if is_deepseek:
-            call_ids = _tool_call_ids_from_response_items(
-                [*turn.session.items, *turn.input_items],
-            )
-            recovered_provider_state = _sessions.provider_state_for_call_ids(
-                "deepseek",
-                call_ids,
-            )
-            session_provider_state = turn.session.provider_state.get("deepseek")
-            chat_adapter.load_provider_state(
-                _merge_deepseek_provider_states(
-                    recovered_provider_state,
-                    session_provider_state,
-                ),
-            )
-            recovered_call_ids = sorted(
-                set(
-                    recovered_provider_state.get(
-                        "reasoning_by_call_id",
-                        {},
-                    )
-                )
-            )
-            if recovered_call_ids:
-                log_debug("DEEPSEEK_PROVIDER_STATE_RECOVERY", {
-                    "recovered_call_ids": recovered_call_ids,
-                    "session_had_provider_state": bool(session_provider_state),
-                })
-        messages = turn.to_chat_messages(chat_adapter.flatten_response_items)
-
-        # Prepend instructions as system message
-        if instructions:
-            messages.insert(0, {"role": "system", "content": instructions})
-        collaboration_mode = _extract_collaboration_mode(messages, instructions)
-        log_debug(
-            "RESPONSES_REQUEST_DIAGNOSTICS",
-            _responses_request_diagnostics(
+            return _handle_responses_passthrough(
                 data,
-                messages,
                 model,
                 model_type,
                 upstream_name,
-            ),
-        )
-
-        # Build payload
-        payload = {
-            k: v for k, v in data.items()
-            if k not in ("messages", "tools", "input", "instructions",
-                         "previous_response_id", "stream", "store", "include")
-        }
-        payload["model"] = upstream_model
-        payload["messages"] = messages
-        payload["stream"] = False  # Always non-streaming internally
-        if tools_raw and not inject_mcp:
-            chat_tools = (
-                chat_adapter.responses_tools_to_chat(tools_raw)
-                if is_deepseek
-                else [convert_responses_tool_to_chat(t) for t in tools_raw]
+                base_url,
+                api_key,
+                upstream_model,
+                tools_raw,
+                normalized_tools,
+                client_requested_stream,
             )
-            if chat_tools:
-                payload["tools"] = chat_tools
-        payload = chat_adapter.filter_request_payload(payload)
-        payload = _apply_provider_defaults(payload, model_type)
+
+        context = _prepare_router_owned_responses_context(
+            data,
+            model,
+            instructions,
+            tools_raw,
+        )
+        payload = _build_responses_chat_payload(data, context, tools_raw)
 
         # ── Run LLM ──
-        llm_response, parse_result, retry_count, response_text = (
-            _run_llm_with_rollback(payload, base_url, api_key, tools, inject_mcp)
-        )
-
-        # ── Build response ──
-        response_id = turn.response_id
-        choice = llm_response.get("choices", [{}])[0]
-        response_message = choice.get("message", {})
-        output_items, output_text, native_tool_calls = (
-            chat_adapter.chat_response_to_output_items(
-                response_message,
-                tool_type_map,
+        llm_response, parse_result, retry_count, _response_text = (
+            _run_llm_with_rollback(
+                payload,
+                context.base_url,
+                context.api_key,
+                tools,
+                context.inject_mcp,
             )
         )
-
-        # Convert usage
-        raw_usage = llm_response.get("usage", {})
-        usage = _responses_usage_from_provider(raw_usage)
-
-        # Extract tool calls
-        tool_calls_list = []
-        if inject_mcp and parse_result and parse_result.success:
-            output_items, tool_calls_list = (
-                _mirothinker_adapter.to_responses_tool_outputs(
-                    parse_result,
-                )
-            )
-        elif native_tool_calls:
-            tool_calls_list = native_tool_calls
-
-        plan_mode_mutation = _plan_mode_mutation_violation(
-            collaboration_mode,
-            output_items,
+        result = _responses_provider_result_from_llm(
+            context,
+            llm_response,
+            parse_result,
+            retry_count,
         )
-        if plan_mode_mutation:
-            log_debug("PLAN_MODE_PROPOSED_PLAN_RETRY", {
-                "model": model,
-                "upstream": upstream_name,
-                "violation": plan_mode_mutation,
-                "response_preview": (response_message.get("content") or "")[:240],
-            })
-            _append_plan_mode_proposed_plan_feedback(payload, response_message)
-            llm_response = make_llm_request(payload, base_url, api_key)
-            choice = llm_response.get("choices", [{}])[0]
-            response_message = choice.get("message", {})
-            output_items, output_text, native_tool_calls = (
-                chat_adapter.chat_response_to_output_items(
-                    response_message,
-                    tool_type_map,
-                )
-            )
-            raw_usage = llm_response.get("usage", {})
-            usage = _responses_usage_from_provider(raw_usage)
-            tool_calls_list = native_tool_calls or []
-
-        _validate_plan_mode_output_items(collaboration_mode, output_items)
-
-        if _plan_mode_should_retry_with_request_user_input(
-            collaboration_mode,
-            output_items,
-            response_message,
-        ):
-            log_debug("PLAN_MODE_REQUEST_USER_INPUT_RETRY", {
-                "model": model,
-                "upstream": upstream_name,
-                "response_preview": response_message.get("content", "")[:240],
-            })
-            _append_plan_mode_retry_feedback(payload, response_message)
-            llm_response = make_llm_request(payload, base_url, api_key)
-            choice = llm_response.get("choices", [{}])[0]
-            response_message = choice.get("message", {})
-            output_items, output_text, native_tool_calls = (
-                chat_adapter.chat_response_to_output_items(
-                    response_message,
-                    tool_type_map,
-                )
-            )
-            raw_usage = llm_response.get("usage", {})
-            usage = _responses_usage_from_provider(raw_usage)
-            tool_calls_list = native_tool_calls or []
-            _validate_plan_mode_output_items(collaboration_mode, output_items)
-
-        has_tool_output = bool(tool_calls_list)
-        output_text = None if has_tool_output else output_text
-        provider_state_updates = (
-            {"deepseek": chat_adapter.dump_provider_state()}
-            if is_deepseek
-            else None
+        result = _retry_plan_mode_recoveries(
+            context,
+            payload,
+            result,
+            model,
         )
-        log_debug(
-            "RESPONSES_RESPONSE_DIAGNOSTICS",
-            _responses_response_diagnostics(llm_response, output_items),
-        )
-        state_machine.commit_response(
-            turn,
-            output_items,
-            provider_state_updates,
-        )
-
-        response = {
-            "id": response_id,
-            "object": "response",
-            "created": llm_response.get("created", int(time.time())),
-            "model": model,
-            "output": output_items,
-            "output_text": output_text,
-            "usage": usage,
-            "status": "completed",
-        }
-        if retry_count > 0:
-            response["_metadata"] = {
-                "rollback_attempts": retry_count,
-                "rollback_success": bool(inject_mcp and parse_result and parse_result.success),
-            }
-        if tool_calls_list:
-            response["tool_calls"] = tool_calls_list
-
-        log_debug("CLIENT_RESPONSE /v1/responses", {
-            "status": "success", "model": model, "model_type": model_type,
-            "has_tool_calls": bool(tool_calls_list),
-            "tool_calls_count": len(tool_calls_list),
-            "rollback_attempts": retry_count if retry_count else None,
-            "session_items": len(turn.session.items),
-            "usage": usage,
-        })
+        response = _commit_and_build_responses_body(context, result, model)
 
         if client_requested_stream:
-            return _build_sse_response(response_id, output_items, usage)
+            return _build_sse_response(
+                context.turn.response_id,
+                result.output_items,
+                result.usage,
+            )
 
         return jsonify(response), 200
 
@@ -1032,7 +771,11 @@ def responses_api() -> tuple[Any, int]:
 
     except LLMRequestError as e:
         payload_for_error = locals().get("payload")
-        is_deepseek_for_error = bool(locals().get("is_deepseek", False))
+        context_for_error = locals().get("context")
+        is_deepseek_for_error = bool(
+            getattr(context_for_error, "is_deepseek", False)
+            or locals().get("is_deepseek", False)
+        )
         error_body, status_code = _llm_request_error_body(
             e,
             payload=payload_for_error,

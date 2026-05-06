@@ -49,6 +49,59 @@ upstream = "deepseek"
 Route order matters: first match wins. Put specific passthrough model aliases
 before broad `deepseek-*` Chat routes.
 
+## Request Flow
+
+The two important `/v1/responses` paths differ by who owns Responses state.
+Official DeepSeek uses the router-owned Chat adapter path. A third-party
+Responses-compatible gateway uses the explicit `responses_passthrough` path,
+where the upstream owns response IDs and continuation state.
+
+### Official DeepSeek Chat Route
+
+```mermaid
+flowchart TD
+    C[Codex client<br/>OpenAI-style /v1/responses] --> R[llm_router /v1/responses]
+    R --> RESOLVE[Resolve model route<br/>deepseek-* -> type chat<br/>upstream deepseek]
+    RESOLVE --> INGEST[ResponsesStateMachine.ingest_request<br/>normalize input<br/>validate tool outputs<br/>allocate local response_id]
+    INGEST --> SESSION[(Local session store<br/>items, pending tool calls,<br/>DeepSeek provider_state)]
+    SESSION --> CTX[Build router-owned turn context<br/>recover reasoning_content by call_id<br/>detect Codex collaboration mode]
+    CTX --> ADAPT[DeepSeekChatAdapter<br/>Responses items -> Chat messages<br/>developer -> system<br/>Codex tools -> Chat function tools]
+    ADAPT --> FILTER[Filter provider payload<br/>drop unsupported Responses fields<br/>map documented chat params]
+    FILTER --> DS[Official DeepSeek Chat API<br/>/chat/completions]
+    DS --> PARSE[Parse provider response<br/>content, tool_calls,<br/>reasoning_content]
+    PARSE --> RECOVER{Codex compatibility recovery needed?}
+    RECOVER -->|Plan-mode plain question| RETRY_UI[Retry as request_user_input tool call]
+    RECOVER -->|Plan-mode mutation attempt| RETRY_PLAN[Retry toward proposed_plan text]
+    RECOVER -->|No| COMMIT[ResponsesStateMachine.commit_response<br/>commit after provider success only]
+    RETRY_UI --> PARSE
+    RETRY_PLAN --> PARSE
+    COMMIT --> SESSION
+    COMMIT --> OUT[Responses-shaped JSON<br/>or simulated Responses SSE]
+    OUT --> C
+    OUT -->|tool calls| TOOLS[Codex executes local tools]
+    TOOLS -->|next turn tool outputs| C
+
+    INGEST -. validation error .-> E1[Client-visible state error<br/>no upstream call<br/>no session advance]
+    DS -. provider error .-> E2[Client-visible provider error<br/>no commit]
+```
+
+### Third-Party DeepSeek Responses Passthrough
+
+```mermaid
+flowchart TD
+    C[Codex client<br/>OpenAI-style /v1/responses] --> R[llm_router /v1/responses]
+    R --> RESOLVE[Resolve explicit route<br/>type responses_passthrough<br/>non-official DeepSeek-compatible gateway]
+    RESOLVE --> NORM[Light request normalization<br/>rewrite model to upstream_model<br/>normalize tool schema aliases<br/>force upstream stream false]
+    NORM --> UP[Third-party native Responses API<br/>/v1/responses]
+    UP --> OWN[(Upstream-owned Responses state<br/>response IDs<br/>previous_response_id<br/>pending tool state)]
+    OWN --> RESP[Provider Responses object]
+    RESP --> SHAPE[Router response shaping<br/>restore client-facing model<br/>normalize usage<br/>optionally simulate SSE]
+    SHAPE --> C
+
+    UP -. provider continuation failure .-> ERR[Client-visible provider error<br/>no fallback to local Chat emulation]
+    R -. official api.deepseek.com matched .-> CHAT[Do not passthrough<br/>use official DeepSeek Chat route]
+```
+
 ## Install
 
 ```bash
@@ -184,10 +237,21 @@ old incompatible tool-call history.
 Developer and agent-facing guidance is provided in [`AGENTS.md`](AGENTS.md) and
 [`CLAUDE.md`](CLAUDE.md).
 
+The main `/v1/responses` regressions are split by behavior under
+[`tests/responses`](tests/responses). [`tests/test_server_responses.py`](tests/test_server_responses.py)
+is an aggregate entrypoint kept for the focused command used by the docs and
+agent instructions.
+
 Run tests:
 
 ```bash
 uv run python -m pytest -q
+```
+
+Run the focused Responses suite:
+
+```bash
+uv run python -m pytest tests/test_server_responses.py -q
 ```
 
 Run lint:

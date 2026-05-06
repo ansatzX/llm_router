@@ -1,0 +1,601 @@
+"""Responses endpoint regression tests."""
+
+import llm_router.server as server_mod
+from llm_router.config import UpstreamConfig
+from tests.responses._helpers import _configure_test_app
+
+
+def test_responses_rejects_duplicate_tool_call_ids_without_persisting(
+    tmp_path,
+    monkeypatch,
+):
+    """Duplicate provider call IDs should not corrupt pending state."""
+    client, _ = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_dup",
+                                "type": "function",
+                                "function": {"name": "first", "arguments": "{}"},
+                            },
+                            {
+                                "id": "call_dup",
+                                "type": "function",
+                                "function": {"name": "second", "arguments": "{}"},
+                            },
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "test-model", "input": "call tools"},
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["code"] == "duplicate_tool_call"
+    assert len(server_mod._sessions) == 0
+
+def test_responses_rejects_unknown_tool_output_before_upstream(
+    tmp_path,
+    monkeypatch,
+):
+    """Unknown tool outputs are state errors and must not reach a provider."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "missing_call",
+                    "output": "orphaned output",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 400
+    assert response.get_json()["error"]["code"] == "invalid_tool_output"
+    mock_make_request.assert_not_called()
+
+def test_responses_deepseek_ignores_multimodal_input_and_keeps_text(
+    tmp_path,
+    monkeypatch,
+):
+    """DeepSeek policy degrades unsupported images instead of failing the turn."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "describe this"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,abc"},
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = mock_make_request.call_args.args[0]
+    assert payload["messages"] == [{"role": "user", "content": "describe this"}]
+
+def test_responses_deepseek_filters_hosted_web_search_tool_before_upstream(
+    tmp_path,
+    monkeypatch,
+):
+    """DeepSeek policy returns a normal empty-result turn without forwarding hosted tools."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": "search the web",
+            "tools": [{"type": "web_search", "external_web_access": False}],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = mock_make_request.call_args.args[0]
+    assert "tools" not in payload
+
+def test_responses_generic_chat_does_not_apply_deepseek_unsupported_feature_policy(
+    tmp_path,
+    monkeypatch,
+):
+    """Unsupported-feature policy belongs to the selected provider adapter."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_upstream = "default"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "describe this"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,abc"},
+                    ],
+                }
+            ],
+            "tools": [{"type": "web_search", "external_web_access": False}],
+        },
+    )
+
+    assert response.status_code == 200
+    mock_make_request.assert_called_once()
+
+def test_responses_rejects_partial_parallel_tool_outputs_before_upstream(
+    tmp_path,
+    monkeypatch,
+):
+    """Parallel tool calls must all be satisfied before the next model call."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_one",
+                                "type": "function",
+                                "function": {"name": "first", "arguments": "{}"},
+                            },
+                            {
+                                "id": "call_two",
+                                "type": "function",
+                                "function": {"name": "second", "arguments": "{}"},
+                            },
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+
+    first = client.post(
+        "/v1/responses",
+        json={"model": "test-model", "input": "call both tools"},
+    )
+    assert first.status_code == 200
+    first_body = first.get_json()
+
+    mock_make_request.reset_mock()
+    second = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "previous_response_id": first_body["id"],
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_one",
+                    "output": "one done",
+                }
+            ],
+        },
+    )
+
+    assert second.status_code == 400
+    assert second.get_json()["error"]["code"] == "pending_tool_calls"
+    mock_make_request.assert_not_called()
+
+def test_responses_chat_route_wraps_non_function_tools_for_chat_backend(
+    tmp_path,
+    monkeypatch,
+):
+    """Chat backends must still see Codex custom tools as callable functions."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": "edit file",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": {"type": "object"},
+                },
+                {
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "description": "freeform patch",
+                    "format": {"type": "grammar"},
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = mock_make_request.call_args.args[0]
+    assert payload["tools"][0] == (
+        {
+            "type": "function",
+            "function": {
+                "name": "exec_command",
+                "description": "",
+                "parameters": {"type": "object"},
+            },
+        }
+    )
+    assert payload["tools"][1]["type"] == "function"
+    assert payload["tools"][1]["function"]["name"] == "apply_patch"
+    assert "freeform patch" in payload["tools"][1]["function"]["description"]
+    assert payload["tools"][1]["function"]["parameters"] == {
+        "type": "object",
+        "properties": {
+            "input": {
+                "type": "string",
+                "description": "Freeform input for the custom tool.",
+            }
+        },
+        "required": ["input"],
+        "additionalProperties": False,
+    }
+
+def test_responses_chat_route_returns_chat_tool_calls_as_response_items(
+    tmp_path,
+    monkeypatch,
+):
+    """Native Chat tool calls from DeepSeek should be returned as Responses items."""
+    client, _ = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_abc",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_command",
+                                    "arguments": '{"cmd":"ls -la"}',
+                                },
+                            },
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "test-model", "input": "list files"},
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["output_text"] is None
+    assert body["output"] == [
+        {
+            "type": "function_call",
+            "id": "call_abc",
+            "call_id": "call_abc",
+            "name": "exec_command",
+            "arguments": '{"cmd":"ls -la"}',
+        }
+    ]
+
+def test_responses_chat_route_restores_custom_tool_calls_as_response_items(
+    tmp_path,
+    monkeypatch,
+):
+    """Wrapped custom tool calls should be restored for Codex execution."""
+    client, _ = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_patch",
+                                "type": "function",
+                                "function": {
+                                    "name": "apply_patch",
+                                    "arguments": '{"input":"*** Begin Patch\\n*** End Patch\\n"}',
+                                },
+                            },
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": "edit",
+            "tools": [
+                {
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "description": "freeform patch",
+                    "format": {"type": "grammar"},
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["output"] == [
+        {
+            "type": "custom_tool_call",
+            "id": "call_patch",
+            "call_id": "call_patch",
+            "name": "apply_patch",
+            "input": "*** Begin Patch\n*** End Patch\n",
+        }
+    ]
+
+def test_responses_stream_restores_custom_tool_calls_as_response_items(
+    tmp_path,
+    monkeypatch,
+):
+    """Streaming Responses events must preserve Codex custom tool item types."""
+    client, _ = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_patch",
+                                "type": "function",
+                                "function": {
+                                    "name": "apply_patch",
+                                    "arguments": '{"input":"*** Begin Patch\\n*** End Patch\\n"}',
+                                },
+                            },
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": "edit",
+            "stream": True,
+            "tools": [
+                {
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "description": "freeform patch",
+                    "format": {"type": "grammar"},
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    event_stream = response.get_data(as_text=True)
+    assert '"type": "custom_tool_call"' in event_stream
+    assert '"input": "*** Begin Patch\\n*** End Patch\\n"' in event_stream
+
+def test_responses_chat_route_returns_reasoning_content_on_tool_call_items(
+    tmp_path,
+    monkeypatch,
+):
+    """DeepSeek thinking mode requires reasoning_content to round-trip."""
+    client, _ = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": "",
+                        "reasoning_content": "I should list files first.",
+                        "tool_calls": [
+                            {
+                                "id": "call_reasoning",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_command",
+                                    "arguments": '{"cmd":"ls -la"}',
+                                },
+                            },
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "test-model", "input": "list files"},
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["output"][0]["reasoning_content"] == "I should list files first."
+
+def test_responses_mirothinker_route_uses_mcp_prompt_not_native_tools(
+    tmp_path,
+    monkeypatch,
+):
+    """MiroThinker is MCP-first: tools are prompt-injected, not forwarded."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": """
+<use_mcp_tool>
+  <server_name>tools</server_name>
+  <tool_name>exec_command</tool_name>
+  <arguments>{"cmd":"ls"}</arguments>
+</use_mcp_tool>
+""",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "mcp_first"
+    server_mod._config.default_upstream = "mirothinker"
+    server_mod._config.upstreams["mirothinker"] = UpstreamConfig(
+        base_url="http://localhost:8000/v1",
+        api_key="not-needed",
+    )
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "mirothinker-test",
+            "input": "list files",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "description": "Runs a command",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"cmd": {"type": "string"}},
+                        "required": ["cmd"],
+                    },
+                }
+            ],
+            "stream": True,
+        },
+    )
+
+    assert response.status_code == 200
+    payload = mock_make_request.call_args.args[0]
+    assert "tools" not in payload
+    assert payload["stream"] is False
+    assert payload["messages"][0]["role"] == "system"
+    assert "<use_mcp_tool>" in payload["messages"][0]["content"]
+    event_stream = response.get_data(as_text=True)
+    assert '"type": "function_call"' in event_stream
+    assert '"name": "exec_command"' in event_stream
