@@ -66,13 +66,16 @@ only when the execution and output lifecycle are clear.
 
 ## Priority 4: Session Concurrency
 
-`SessionStore` uses a JSON file and atomic replace. This is acceptable for a
-single router process, but not a strong concurrent persistence design.
+`SessionStore` uses a JSON file, process-local locking, advisory file locking,
+unique temporary files, and atomic replace. This protects the current
+single-file store from same-process mutation races and fixed-temp-file
+collisions across router processes.
 
 Future work:
 
-- add file locking or another concurrency-safe persistence layer
-- test concurrent commits to different sessions
+- replace the JSON file with a persistence layer that can merge concurrent
+  commits from separate router processes
+- test concurrent commits to different sessions across separate processes
 - test concurrent commits to the same session
 - preserve commit-after-success semantics
 

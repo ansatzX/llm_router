@@ -1,5 +1,9 @@
 """Tests for persisted Responses API session state."""
 
+import json
+import threading
+
+import llm_router.session_store as session_store_mod
 from llm_router.session_store import SessionStore
 
 
@@ -38,3 +42,38 @@ def test_register_response_id_keeps_latest_response_link(tmp_path):
 
     assert store.get("resp_next") is session
     assert session.response_id == "resp_next"
+
+
+def test_concurrent_store_instances_do_not_share_temp_file(tmp_path, monkeypatch):
+    """Independent router processes should not race on one fixed temp path."""
+    store_path = tmp_path / "sessions.json"
+    monkeypatch.setattr(session_store_mod, "fcntl", None)
+    stores = [
+        SessionStore(store_path=store_path, ttl_seconds=3600),
+        SessionStore(store_path=store_path, ttl_seconds=3600),
+    ]
+    original_dump = json.dump
+    barrier = threading.Barrier(2)
+
+    def synchronized_dump(*args, **kwargs):
+        original_dump(*args, **kwargs)
+        barrier.wait(timeout=5)
+
+    monkeypatch.setattr(json, "dump", synchronized_dump)
+
+    errors = []
+
+    def create_session(store):
+        try:
+            store.create("test-model")
+        except Exception as exc:  # pragma: no cover - assertion reports details
+            errors.append(exc)
+
+    threads = [threading.Thread(target=create_session, args=(store,)) for store in stores]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []

@@ -243,6 +243,7 @@ class DeepSeekChatAdapter:
         pending_interleaved_messages: list[dict[str, Any]] = []
         pending_legacy_tool_calls: list[dict[str, Any]] = []
         pending_legacy_outputs: list[dict[str, Any]] = []
+        pending_legacy_interleaved_messages: list[dict[str, Any]] = []
 
         def flush_pending_tool_calls() -> None:
             nonlocal pending_tool_call_message, pending_tool_call_emitted
@@ -277,18 +278,22 @@ class DeepSeekChatAdapter:
             return output_ids
 
         def flush_legacy_tool_calls_without_outputs() -> None:
-            nonlocal pending_legacy_tool_calls
+            nonlocal pending_legacy_tool_calls, pending_legacy_interleaved_messages
             for tool_call in pending_legacy_tool_calls:
                 result.append({
                     "role": "user",
                     "content": self._legacy_tool_call_to_text(tool_call),
                 })
             pending_legacy_tool_calls = []
+            if pending_legacy_interleaved_messages:
+                result.extend(pending_legacy_interleaved_messages)
+                pending_legacy_interleaved_messages = []
 
         def flush_legacy_tool_calls_with_outputs(
             outputs: list[dict[str, Any]],
         ) -> None:
             nonlocal pending_legacy_tool_calls, pending_legacy_outputs
+            nonlocal pending_legacy_interleaved_messages
             output_by_call_id = {
                 output.get("tool_call_id") or "unknown_call": output
                 for output in outputs
@@ -302,6 +307,9 @@ class DeepSeekChatAdapter:
                 })
             pending_legacy_tool_calls = []
             pending_legacy_outputs = []
+            if pending_legacy_interleaved_messages:
+                result.extend(pending_legacy_interleaved_messages)
+                pending_legacy_interleaved_messages = []
 
         for msg in messages:
             if not isinstance(msg, dict):
@@ -342,6 +350,13 @@ class DeepSeekChatAdapter:
                 and converted.get("role") == "tool"
             ):
                 pending_legacy_outputs.append(converted)
+                continue
+
+            if pending_legacy_tool_calls:
+                if isinstance(converted, list):
+                    pending_legacy_interleaved_messages.extend(converted)
+                else:
+                    pending_legacy_interleaved_messages.append(converted)
                 continue
 
             if (

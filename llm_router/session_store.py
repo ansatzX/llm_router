@@ -8,12 +8,20 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
+import threading
 import time
 import uuid
 from collections import OrderedDict
 from collections.abc import Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
+
+try:
+    import fcntl
+except ImportError:  # pragma: no cover - non-POSIX fallback
+    fcntl = None
 
 DEFAULT_STORE_PATH = Path.home() / ".config/llm-router/sessions.json"
 
@@ -112,6 +120,7 @@ class SessionStore:
         self.store_path = Path(store_path)
         self.max_sessions = max_sessions
         self.ttl_seconds = ttl_seconds
+        self._lock = threading.RLock()
         self._store: OrderedDict[str, ResponsesSession] = OrderedDict()
         self._load()
 
@@ -120,43 +129,69 @@ class SessionStore:
     def _ensure_dir(self):
         self.store_path.parent.mkdir(parents=True, exist_ok=True)
 
+    @contextmanager
+    def _file_lock(self):
+        """Serialize writes from multiple router processes."""
+        self._ensure_dir()
+        with open(self.store_path.with_suffix(".lock"), "a") as lock_file:
+            if fcntl is not None:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                if fcntl is not None:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
     def _load(self):
-        if not self.store_path.exists():
-            return
-        try:
-            with open(self.store_path) as f:
-                data = json.load(f)
-            loaded = 0
-            for rid, raw in data.get("sessions", {}).items():
-                session = ResponsesSession.from_dict(raw)
-                self._store[rid] = session
-                loaded += 1
-            if loaded:
-                pass  # Silent load
-        except (json.JSONDecodeError, OSError):
-            pass
+        with self._lock:
+            if not self.store_path.exists():
+                return
+            try:
+                with open(self.store_path) as f:
+                    data = json.load(f)
+                loaded = 0
+                for rid, raw in data.get("sessions", {}).items():
+                    session = ResponsesSession.from_dict(raw)
+                    self._store[rid] = session
+                    loaded += 1
+                if loaded:
+                    pass  # Silent load
+            except (json.JSONDecodeError, OSError):
+                pass
 
     def _save(self):
-        self._ensure_dir()
-        # Write to temp file first, then atomically rename
-        tmp = self.store_path.with_suffix(".tmp")
-        unique_sessions = []
-        seen_ids = set()
-        for session in self._store.values():
-            object_id = id(session)
-            if object_id not in seen_ids:
-                unique_sessions.append(session)
-                seen_ids.add(object_id)
-        data = {
-            "version": 1,
-            "updated_at": time.time(),
-            "sessions": {
-                s.response_id: s.to_dict() for s in unique_sessions
-            },
-        }
-        with open(tmp, "w") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False)
-        os.replace(tmp, self.store_path)
+        with self._lock, self._file_lock():
+            fd, tmp_name = tempfile.mkstemp(
+                prefix=f"{self.store_path.name}.",
+                suffix=".tmp",
+                dir=self.store_path.parent,
+            )
+            tmp = Path(tmp_name)
+            try:
+                unique_sessions = []
+                seen_ids = set()
+                for session in self._store.values():
+                    object_id = id(session)
+                    if object_id not in seen_ids:
+                        unique_sessions.append(session)
+                        seen_ids.add(object_id)
+                data = {
+                    "version": 1,
+                    "updated_at": time.time(),
+                    "sessions": {
+                        s.response_id: s.to_dict() for s in unique_sessions
+                    },
+                }
+                with os.fdopen(fd, "w") as f:
+                    fd = None
+                    json.dump(data, f, indent=2, ensure_ascii=False)
+                os.replace(tmp, self.store_path)
+            except Exception:
+                if fd is not None:
+                    os.close(fd)
+                if tmp.exists():
+                    tmp.unlink()
+                raise
 
     # ── Eviction ───────────────────────────────────────────────────────
 
@@ -178,29 +213,32 @@ class SessionStore:
     # ── Public API ─────────────────────────────────────────────────────
 
     def create(self, model: str) -> ResponsesSession:
-        self._evict_expired()
-        self._evict_lru()
-        response_id = f"resp_{uuid.uuid4().hex[:12]}"
-        session = ResponsesSession(response_id, model)
-        self._store[response_id] = session
-        self._save()
-        return session
+        with self._lock:
+            self._evict_expired()
+            self._evict_lru()
+            response_id = f"resp_{uuid.uuid4().hex[:12]}"
+            session = ResponsesSession(response_id, model)
+            self._store[response_id] = session
+            self._save()
+            return session
 
     def get(self, response_id: str) -> ResponsesSession | None:
-        self._evict_expired()
-        session = self._store.get(response_id)
-        if session:
-            session.last_access = time.time()
-        return session
+        with self._lock:
+            self._evict_expired()
+            session = self._store.get(response_id)
+            if session:
+                session.last_access = time.time()
+            return session
 
     def get_or_create(
         self, response_id: str | None, model: str,
     ) -> ResponsesSession:
-        if response_id:
-            session = self.get(response_id)
-            if session:
-                return session
-        return self.create(model)
+        with self._lock:
+            if response_id:
+                session = self.get(response_id)
+                if session:
+                    return session
+            return self.create(model)
 
     def add_items(
         self,
@@ -208,8 +246,9 @@ class SessionStore:
         items: Sequence[dict[str, Any]],
     ) -> None:
         """Append user/input items and persist the updated session."""
-        session.add_items(items)
-        self._save()
+        with self._lock:
+            session.add_items(items)
+            self._save()
 
     def add_output_item(
         self,
@@ -217,12 +256,14 @@ class SessionStore:
         item: dict[str, Any],
     ) -> None:
         """Append assistant output and persist the updated session."""
-        session.add_output_item(item)
-        self._save()
+        with self._lock:
+            session.add_output_item(item)
+            self._save()
 
     def save(self) -> None:
         """Persist the current in-memory sessions."""
-        self._save()
+        with self._lock:
+            self._save()
 
     def register_response_id(
         self,
@@ -235,35 +276,39 @@ class SessionStore:
         response's ID. Keep the store keyed by the latest response ID so the
         next request resumes the accumulated session.
         """
-        old_keys = [rid for rid, stored in self._store.items() if stored is session]
-        for rid in old_keys:
-            del self._store[rid]
-        session.response_id = response_id
-        session.last_access = time.time()
-        self._store[response_id] = session
-        self._save()
+        with self._lock:
+            old_keys = [rid for rid, stored in self._store.items() if stored is session]
+            for rid in old_keys:
+                del self._store[rid]
+            session.response_id = response_id
+            session.last_access = time.time()
+            self._store[response_id] = session
+            self._save()
 
     # ── Clear ──────────────────────────────────────────────────────────
 
     def clear_all(self) -> int:
         """Delete all sessions. Returns count of sessions removed."""
-        count = len(self._store)
-        self._store.clear()
-        if self.store_path.exists():
-            self.store_path.unlink()
-        return count
+        with self._lock, self._file_lock():
+            count = len(self._store)
+            self._store.clear()
+            if self.store_path.exists():
+                self.store_path.unlink()
+            return count
 
     def stats(self) -> dict[str, Any]:
         """Diagnostic info: count, total items, disk path, etc."""
-        total_items = sum(s.item_count() for s in self._store.values())
-        return {
-            "session_count": len(self._store),
-            "total_items": total_items,
-            "store_path": str(self.store_path),
-            "store_size_bytes": (
-                self.store_path.stat().st_size if self.store_path.exists() else 0
-            ),
-        }
+        with self._lock:
+            total_items = sum(s.item_count() for s in self._store.values())
+            return {
+                "session_count": len(self._store),
+                "total_items": total_items,
+                "store_path": str(self.store_path),
+                "store_size_bytes": (
+                    self.store_path.stat().st_size if self.store_path.exists() else 0
+                ),
+            }
 
     def __len__(self) -> int:
-        return len(self._store)
+        with self._lock:
+            return len(self._store)

@@ -1382,6 +1382,85 @@ def test_responses_accepts_codex_side_channel_between_tool_call_and_output(
     ]
 
 
+def test_responses_deepseek_legacy_parallel_tool_calls_keep_interleaved_side_channel(
+    tmp_path,
+    monkeypatch,
+):
+    """Legacy DeepSeek replay should not emit orphan Chat tool messages."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 124,
+            "choices": [{"message": {"content": "opened"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "open site"}],
+                },
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": '{"cmd":"first"}',
+                    "call_id": "call_first",
+                },
+                {
+                    "type": "function_call",
+                    "name": "exec_command",
+                    "arguments": '{"cmd":"second"}',
+                    "call_id": "call_second",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_first",
+                    "output": "first output",
+                },
+                {
+                    "type": "message",
+                    "role": "developer",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": 'Approved command prefix saved:\n- ["open"]',
+                        }
+                    ],
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_second",
+                    "output": "second output",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = mock_make_request.call_args.args[0]
+    assert [message["role"] for message in payload["messages"]] == [
+        "user",
+        "user",
+        "user",
+        "system",
+    ]
+    assert all(message["role"] != "tool" for message in payload["messages"])
+    assert "Tool output:\nfirst output" in payload["messages"][1]["content"]
+    assert "Tool output:\nsecond output" in payload["messages"][2]["content"]
+
+
 def test_responses_deepseek_persists_provider_reasoning_state(
     tmp_path,
     monkeypatch,
