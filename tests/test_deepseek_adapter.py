@@ -236,8 +236,8 @@ def test_deepseek_exports_reasoning_cache_as_provider_state():
     }
 
 
-def test_deepseek_downgrades_uncached_tool_turns_without_reasoning():
-    """Restarted router cannot safely replay DeepSeek thinking tool turns."""
+def test_deepseek_replays_uncached_tool_turns_without_text_transcript():
+    """Missing reasoning sidecars must not be downgraded to user-visible text."""
     adapter = DeepSeekChatAdapter()
 
     messages = adapter.flatten_response_items(
@@ -256,67 +256,14 @@ def test_deepseek_downgrades_uncached_tool_turns_without_reasoning():
         ]
     )
 
-    assert messages == [
-        {
-            "role": "user",
-            "content": (
-                "[historical tool call omitted: exec_command "
-                "call_id=call_missing_reasoning]\n"
-                '{"cmd":"ls"}\n'
-                "Tool output:\nREADME.md\n"
-            ),
-        }
-    ]
-
-
-def test_deepseek_keeps_later_reasoned_tool_turns_after_legacy_turn():
-    adapter = DeepSeekChatAdapter()
-
-    messages = adapter.flatten_response_items(
-        [
-            {
-                "type": "function_call",
-                "name": "exec_command",
-                "arguments": '{"cmd":"cat skill"}',
-                "call_id": "call_without_reasoning",
-            },
-            {
-                "type": "function_call_output",
-                "call_id": "call_without_reasoning",
-                "output": "skill text",
-            },
-            {
-                "type": "message",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": "hello"}],
-            },
-            {
-                "type": "function_call",
-                "name": "exec_command",
-                "arguments": '{"cmd":"ls"}',
-                "call_id": "call_with_reasoning",
-                "reasoning_content": "inspect repo",
-            },
-            {
-                "type": "function_call_output",
-                "call_id": "call_with_reasoning",
-                "output": "README.md",
-            },
-        ]
-    )
-
     assert [message["role"] for message in messages] == [
-        "user",
-        "assistant",
         "assistant",
         "tool",
     ]
-    assert messages[0]["content"].startswith(
-        "[historical tool call omitted: exec_command "
-        "call_id=call_without_reasoning]"
-    )
-    assert messages[2]["reasoning_content"] == "inspect repo"
-    assert messages[2]["tool_calls"][0]["id"] == "call_with_reasoning"
+    assert messages[0]["tool_calls"][0]["id"] == "call_missing_reasoning"
+    assert messages[1]["tool_call_id"] == "call_missing_reasoning"
+    assert "historical tool call omitted" not in str(messages)
+    assert "Tool output:" not in str(messages)
 
 
 def test_deepseek_restores_chat_response_tool_calls_to_responses_items():

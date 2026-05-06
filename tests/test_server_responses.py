@@ -4,6 +4,7 @@ from unittest.mock import Mock
 
 import llm_router.server as server_mod
 from llm_router.config import RouteConfig, RouterConfig, UpstreamConfig
+from llm_router.llm_client import LLMRequestError
 from llm_router.session_store import SessionStore
 
 
@@ -1237,7 +1238,7 @@ def test_responses_chat_route_resumes_pending_tool_call_state(
     tmp_path,
     monkeypatch,
 ):
-    """Chat routes should use router state when previous_response_id is provided."""
+    """Chat routes should replay pending tool state without text transcripts."""
     client, mock_make_request = _configure_test_app(
         tmp_path,
         monkeypatch,
@@ -1309,11 +1310,27 @@ def test_responses_chat_route_resumes_pending_tool_call_state(
     assert second_payload["messages"] == [
         {"role": "user", "content": "list files"},
         {
-            "role": "user",
-            "content": "[historical tool call omitted: exec_command call_id=call_ls]\n"
-            '{"cmd":"ls"}\nTool output:\nREADME.md\nsrc',
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_ls",
+                    "type": "function",
+                    "function": {
+                        "name": "exec_command",
+                        "arguments": '{"cmd":"ls"}',
+                    },
+                },
+            ],
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_ls",
+            "content": "README.md\nsrc",
         },
     ]
+    assert "historical tool call omitted" not in str(second_payload["messages"])
+    assert "Tool output:" not in str(second_payload["messages"])
 
 
 def test_responses_accepts_codex_side_channel_between_tool_call_and_output(
@@ -1386,7 +1403,7 @@ def test_responses_deepseek_legacy_parallel_tool_calls_keep_interleaved_side_cha
     tmp_path,
     monkeypatch,
 ):
-    """Legacy DeepSeek replay should not emit orphan Chat tool messages."""
+    """DeepSeek replay should keep structured tool messages around side channels."""
     client, mock_make_request = _configure_test_app(
         tmp_path,
         monkeypatch,
@@ -1452,13 +1469,17 @@ def test_responses_deepseek_legacy_parallel_tool_calls_keep_interleaved_side_cha
     payload = mock_make_request.call_args.args[0]
     assert [message["role"] for message in payload["messages"]] == [
         "user",
-        "user",
-        "user",
+        "assistant",
+        "tool",
+        "tool",
         "system",
     ]
-    assert all(message["role"] != "tool" for message in payload["messages"])
-    assert "Tool output:\nfirst output" in payload["messages"][1]["content"]
-    assert "Tool output:\nsecond output" in payload["messages"][2]["content"]
+    assert payload["messages"][1]["tool_calls"][0]["id"] == "call_first"
+    assert payload["messages"][1]["tool_calls"][1]["id"] == "call_second"
+    assert payload["messages"][2]["tool_call_id"] == "call_first"
+    assert payload["messages"][3]["tool_call_id"] == "call_second"
+    assert "historical tool call omitted" not in str(payload["messages"])
+    assert "Tool output:" not in str(payload["messages"])
 
 
 def test_responses_deepseek_persists_provider_reasoning_state(
@@ -1577,6 +1598,191 @@ def test_responses_deepseek_restores_reasoning_from_provider_state_after_restart
     payload = mock_make_request.call_args.args[0]
     assert payload["messages"][0]["role"] == "assistant"
     assert payload["messages"][0]["reasoning_content"] == "persisted reasoning"
+
+
+def test_responses_deepseek_missing_reasoning_provider_error_is_client_visible(
+    tmp_path,
+    monkeypatch,
+):
+    """DeepSeek's thinking replay 400 should not be hidden as a 500."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    store = server_mod._sessions
+    session = store.create("test-model")
+    session.items = [
+        {
+            "type": "function_call",
+            "id": "call_ls",
+            "call_id": "call_ls",
+            "name": "exec_command",
+            "arguments": '{"cmd":"ls"}',
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_ls",
+            "output": "README.md",
+        },
+    ]
+    session.pending_tool_calls = {
+        "call_ls": {
+            "call_id": "call_ls",
+            "name": "exec_command",
+            "type": "function_call",
+            "arguments": '{"cmd":"ls"}',
+            "created_response_id": session.response_id,
+            "status": "satisfied",
+        }
+    }
+    store.save()
+    original_items = list(session.items)
+    mock_make_request.side_effect = LLMRequestError(
+        "The `reasoning_content` in the thinking mode must be passed back to the API.",
+        status_code=400,
+        body={
+            "error": {
+                "message": (
+                    "The `reasoning_content` in the thinking mode must be "
+                    "passed back to the API."
+                ),
+                "type": "invalid_request_error",
+                "code": "invalid_request_error",
+            }
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "previous_response_id": session.response_id,
+            "input": "continue",
+        },
+    )
+
+    assert response.status_code == 409
+    body = response.get_json()
+    assert body["error"]["code"] == "deepseek_missing_reasoning_content"
+    assert "call_ls" in body["error"]["message"]
+    assert server_mod._sessions.get(session.response_id).items == original_items
+
+
+def test_responses_deepseek_recovers_reasoning_for_stateless_codex_replay(
+    tmp_path,
+    monkeypatch,
+):
+    """Codex can resend full history without previous_response_id."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": "checking files",
+                        "reasoning_content": "inspect repo before editing",
+                        "tool_calls": [
+                            {
+                                "id": "call_ls",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_command",
+                                    "arguments": '{"cmd":"ls"}',
+                                },
+                            },
+                            {
+                                "id": "call_pyproject",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_command",
+                                    "arguments": '{"cmd":"cat pyproject.toml"}',
+                                },
+                            },
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    first = client.post(
+        "/v1/responses",
+        json={"model": "test-model", "input": "look around"},
+    )
+
+    assert first.status_code == 200
+    mock_make_request.return_value = {
+        "created": 124,
+        "choices": [{"message": {"content": "done"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+    }
+
+    second = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "look around"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_ls",
+                    "name": "exec_command",
+                    "arguments": '{"cmd":"ls"}',
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_pyproject",
+                    "name": "exec_command",
+                    "arguments": '{"cmd":"cat pyproject.toml"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_ls",
+                    "output": "README.md",
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_pyproject",
+                    "output": "[project]",
+                },
+            ],
+        },
+    )
+
+    assert second.status_code == 200
+    payload = mock_make_request.call_args.args[0]
+    assistant_tool_messages = [
+        message for message in payload["messages"]
+        if message.get("role") == "assistant" and message.get("tool_calls")
+    ]
+    assert len(assistant_tool_messages) == 1
+    assert (
+        assistant_tool_messages[0]["reasoning_content"]
+        == "inspect repo before editing"
+    )
 
 
 def test_responses_deepseek_provider_state_survives_session_store_reload(

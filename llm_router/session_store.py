@@ -23,7 +23,17 @@ try:
 except ImportError:  # pragma: no cover - non-POSIX fallback
     fcntl = None
 
-DEFAULT_STORE_PATH = Path.home() / ".config/llm-router/sessions.json"
+SESSION_STORE_ENV = "LLM_ROUTER_SESSION_STORE"
+DEFAULT_STORE_DIR = ".llm-router"
+DEFAULT_STORE_FILE = "sessions.json"
+
+
+def default_store_path() -> Path:
+    """Return the startup-directory-local default session store path."""
+    configured = os.environ.get(SESSION_STORE_ENV)
+    if configured:
+        return Path(configured).expanduser()
+    return Path.cwd() / DEFAULT_STORE_DIR / DEFAULT_STORE_FILE
 
 
 class ResponsesSession:
@@ -113,11 +123,11 @@ class SessionStore:
 
     def __init__(
         self,
-        store_path: str | Path = DEFAULT_STORE_PATH,
+        store_path: str | Path | None = None,
         max_sessions: int = 1000,
         ttl_seconds: int = 86400 * 30,  # 30 days default
     ):
-        self.store_path = Path(store_path)
+        self.store_path = Path(store_path).expanduser() if store_path else default_store_path()
         self.max_sessions = max_sessions
         self.ttl_seconds = ttl_seconds
         self._lock = threading.RLock()
@@ -264,6 +274,54 @@ class SessionStore:
         """Persist the current in-memory sessions."""
         with self._lock:
             self._save()
+
+    def provider_state_for_call_ids(
+        self,
+        provider: str,
+        call_ids: set[str],
+    ) -> dict[str, Any]:
+        """Recover provider-private sidecar data by tool call ID.
+
+        Codex can replay full local history without ``previous_response_id``.
+        In that shape, provider-only sidecars are not present in the input, so
+        recover them from recent persisted router sessions by stable call ID.
+        """
+        wanted = {str(call_id) for call_id in call_ids if call_id}
+        if not wanted:
+            return {}
+
+        with self._lock:
+            reasoning_by_call_id: dict[str, str] = {}
+            seen_sessions: set[int] = set()
+            sessions = sorted(
+                self._store.values(),
+                key=lambda session: session.last_access,
+                reverse=True,
+            )
+            for session in sessions:
+                session_key = id(session)
+                if session_key in seen_sessions:
+                    continue
+                seen_sessions.add(session_key)
+
+                provider_state = session.provider_state.get(provider, {})
+                if not isinstance(provider_state, dict):
+                    continue
+                reasoning_state = provider_state.get("reasoning_by_call_id", {})
+                if not isinstance(reasoning_state, dict):
+                    continue
+
+                missing = wanted - set(reasoning_by_call_id)
+                for call_id in missing:
+                    value = reasoning_state.get(call_id)
+                    if value:
+                        reasoning_by_call_id[call_id] = str(value)
+                if wanted <= set(reasoning_by_call_id):
+                    break
+
+            if not reasoning_by_call_id:
+                return {}
+            return {"reasoning_by_call_id": reasoning_by_call_id}
 
     def register_response_id(
         self,

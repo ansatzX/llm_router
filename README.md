@@ -152,8 +152,11 @@ Only MiroThinker is intended to be MCP-first.
 Responses sessions are stored at:
 
 ```text
-~/.config/llm-router/sessions.json
+./.llm-router/sessions.json
 ```
+
+Set `LLM_ROUTER_SESSION_STORE=/path/to/sessions.json` to use an explicit
+session file.
 
 Check session state:
 

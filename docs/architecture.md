@@ -80,8 +80,11 @@ reasoning replay data.
 Sessions are persisted as JSON under:
 
 ```text
-~/.config/llm-router/sessions.json
+./.llm-router/sessions.json
 ```
+
+The path is relative to the router process startup directory. Set
+`LLM_ROUTER_SESSION_STORE=/path/to/sessions.json` to use an explicit store.
 
 The store writes via atomic replace, which is acceptable for current
 single-router usage. It is not yet a strong concurrent multi-process store.
@@ -111,6 +114,10 @@ Current DeepSeek behavior:
   routes, producing an empty/no-op provider tool surface instead of a 400
 - restores wrapped custom calls as Responses output items
 - persists and replays `reasoning_content` required by DeepSeek thinking mode
+- recovers persisted DeepSeek sidecars by tool `call_id` when Codex resends
+  full local history without `previous_response_id`
+- reports DeepSeek thinking replay failures as client-visible provider errors
+  without advancing the local session
 
 DeepSeek accepts only `tools[].type == "function"`, so tools must be converted,
 not discarded.

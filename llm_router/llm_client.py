@@ -105,6 +105,60 @@ class ResponsesPassthroughUnsupportedError(ResponsesPassthroughError):
     """Raised when an upstream does not support native /v1/responses."""
 
 
+class LLMRequestError(Exception):
+    """Raised when an upstream Chat Completions request fails."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int = 502,
+        body: Any | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.body = body
+
+
+def _provider_error_body(exc: Exception) -> Any | None:
+    body = getattr(exc, "body", None)
+    if body is not None:
+        return body
+
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+
+    try:
+        return response.json()
+    except Exception:
+        return getattr(response, "text", None)
+
+
+def _provider_status_code(exc: Exception) -> int:
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code
+
+    response = getattr(exc, "response", None)
+    response_status = getattr(response, "status_code", None)
+    if isinstance(response_status, int):
+        return response_status
+
+    return 502
+
+
+def _provider_error_message(body: Any | None, fallback: str) -> str:
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict) and isinstance(error.get("message"), str):
+            return error["message"]
+        if isinstance(body.get("message"), str):
+            return body["message"]
+    return fallback
+
+
 def _normalize_base_url(llm_base_url: str) -> str:
     """Normalize an upstream base URL, appending /v1 for host-only URLs."""
     base_url = llm_base_url.rstrip("/")
@@ -160,7 +214,7 @@ def make_llm_request(payload: dict[str, Any], llm_base_url: str, api_key: str | 
         The response dict from the LLM backend.
 
     Raises:
-        Exception: If the request fails.
+        LLMRequestError: If the upstream request fails.
     """
     client = _get_client(llm_base_url, api_key)
 
@@ -205,7 +259,14 @@ def make_llm_request(payload: dict[str, Any], llm_base_url: str, api_key: str | 
 
         return result
     except Exception as e:
-        raise Exception(f"LLM request error: {e}") from e
+        body = _provider_error_body(e)
+        status_code = _provider_status_code(e)
+        message = _provider_error_message(body, str(e))
+        raise LLMRequestError(
+            message,
+            status_code=status_code,
+            body=body,
+        ) from e
 
 
 def make_responses_request(

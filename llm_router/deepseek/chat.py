@@ -241,9 +241,6 @@ class DeepSeekChatAdapter:
         pending_tool_call_message: dict[str, Any] | None = None
         pending_tool_call_emitted = False
         pending_interleaved_messages: list[dict[str, Any]] = []
-        pending_legacy_tool_calls: list[dict[str, Any]] = []
-        pending_legacy_outputs: list[dict[str, Any]] = []
-        pending_legacy_interleaved_messages: list[dict[str, Any]] = []
 
         def flush_pending_tool_calls() -> None:
             nonlocal pending_tool_call_message, pending_tool_call_emitted
@@ -277,40 +274,6 @@ class DeepSeekChatAdapter:
                         output_ids.add(tool_call_id)
             return output_ids
 
-        def flush_legacy_tool_calls_without_outputs() -> None:
-            nonlocal pending_legacy_tool_calls, pending_legacy_interleaved_messages
-            for tool_call in pending_legacy_tool_calls:
-                result.append({
-                    "role": "user",
-                    "content": self._legacy_tool_call_to_text(tool_call),
-                })
-            pending_legacy_tool_calls = []
-            if pending_legacy_interleaved_messages:
-                result.extend(pending_legacy_interleaved_messages)
-                pending_legacy_interleaved_messages = []
-
-        def flush_legacy_tool_calls_with_outputs(
-            outputs: list[dict[str, Any]],
-        ) -> None:
-            nonlocal pending_legacy_tool_calls, pending_legacy_outputs
-            nonlocal pending_legacy_interleaved_messages
-            output_by_call_id = {
-                output.get("tool_call_id") or "unknown_call": output
-                for output in outputs
-            }
-            for tool_call in pending_legacy_tool_calls:
-                call_id = tool_call["tool_calls"][0]["id"]
-                output = output_by_call_id.get(call_id)
-                result.append({
-                    "role": "user",
-                    "content": self._legacy_tool_call_to_text(tool_call, output),
-                })
-            pending_legacy_tool_calls = []
-            pending_legacy_outputs = []
-            if pending_legacy_interleaved_messages:
-                result.extend(pending_legacy_interleaved_messages)
-                pending_legacy_interleaved_messages = []
-
         for msg in messages:
             if not isinstance(msg, dict):
                 continue
@@ -322,13 +285,6 @@ class DeepSeekChatAdapter:
                 and converted.get("role") == "assistant"
                 and converted.get("tool_calls")
             ):
-                if pending_legacy_outputs:
-                    flush_legacy_tool_calls_with_outputs(pending_legacy_outputs)
-                if "reasoning_content" not in converted:
-                    flush_pending_tool_calls()
-                    pending_legacy_tool_calls.append(converted)
-                    continue
-                flush_legacy_tool_calls_without_outputs()
                 if pending_tool_call_message is None:
                     pending_tool_call_message = converted
                 else:
@@ -342,21 +298,6 @@ class DeepSeekChatAdapter:
                         pending_tool_call_message["reasoning_content"] = (
                             converted["reasoning_content"]
                         )
-                continue
-
-            if (
-                pending_legacy_tool_calls
-                and isinstance(converted, dict)
-                and converted.get("role") == "tool"
-            ):
-                pending_legacy_outputs.append(converted)
-                continue
-
-            if pending_legacy_tool_calls:
-                if isinstance(converted, list):
-                    pending_legacy_interleaved_messages.extend(converted)
-                else:
-                    pending_legacy_interleaved_messages.append(converted)
                 continue
 
             if (
@@ -384,16 +325,11 @@ class DeepSeekChatAdapter:
                     pending_interleaved_messages.append(converted)
                 continue
 
-            if pending_legacy_outputs:
-                flush_legacy_tool_calls_with_outputs(pending_legacy_outputs)
             flush_pending_tool_calls()
             if isinstance(converted, list):
                 result.extend(converted)
             else:
                 result.append(converted)
-        if pending_legacy_outputs:
-            flush_legacy_tool_calls_with_outputs(pending_legacy_outputs)
-        flush_legacy_tool_calls_without_outputs()
         flush_pending_tool_calls()
         log_debug("DEEPSEEK_RESPONSES_TO_CHAT_CONVERSION", {
             "input_count": len(messages),
@@ -403,22 +339,6 @@ class DeepSeekChatAdapter:
             "output_roles": [m.get("role") for m in result],
         })
         return result
-
-    def _legacy_tool_call_to_text(
-        self,
-        tool_call_message: dict[str, Any],
-        tool_output_message: dict[str, Any] | None = None,
-    ) -> str:
-        tool_call = tool_call_message["tool_calls"][0]
-        function = tool_call.get("function", {})
-        text = (
-            f"[historical tool call omitted: {function.get('name', '')} "
-            f"call_id={tool_call.get('id', '')}]\n"
-            f"{function.get('arguments', '')}"
-        )
-        if tool_output_message is not None:
-            text += f"\nTool output:\n{tool_output_message.get('content', '')}"
-        return text
 
     def responses_tools_to_chat(
         self,

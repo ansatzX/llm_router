@@ -102,6 +102,17 @@ Provider-private metadata should be stored under the session's
 `provider_state`, not in process-global mutable state. Update this sidecar only
 as part of a successful response commit.
 
+DeepSeek tool turns should always be replayed as structured Chat
+`assistant.tool_calls` and `tool` messages. Include `reasoning_content` when it
+is available from `provider_state`, but do not invent it and do not convert
+historical tool calls or tool outputs into normal user-visible text transcripts.
+Codex may also resend its full local history without `previous_response_id`; in
+that case, recover DeepSeek sidecars from persisted sessions by stable tool
+`call_id` before sending the Chat request upstream.
+If DeepSeek rejects a continuation because thinking-mode `reasoning_content` is
+missing, return a client-visible provider error and leave the session unchanged.
+Do not silently downgrade thinking mode or fabricate provider reasoning.
+
 ## MiroThinker MCP-First
 
 Only MiroThinker is currently `mcp_first`.

@@ -23,6 +23,7 @@ from llm_router.config import RouterConfig
 from llm_router.debug_log import log_debug
 from llm_router.deepseek import DeepSeekChatAdapter
 from llm_router.llm_client import (
+    LLMRequestError,
     ResponsesPassthroughError,
     _get_env_float,
     check_backend_health,
@@ -486,6 +487,101 @@ def _responses_response_diagnostics(
     }
 
 
+def _deepseek_missing_reasoning_tool_call_ids(
+    payload: dict[str, Any] | None,
+) -> list[str]:
+    if not isinstance(payload, dict):
+        return []
+
+    missing: list[str] = []
+    for message in payload.get("messages", []) or []:
+        if not isinstance(message, dict):
+            continue
+        tool_calls = message.get("tool_calls") or []
+        if (
+            message.get("role") != "assistant"
+            or not isinstance(tool_calls, list)
+            or message.get("reasoning_content")
+        ):
+            continue
+        for tool_call in tool_calls:
+            if isinstance(tool_call, dict) and isinstance(tool_call.get("id"), str):
+                missing.append(tool_call["id"])
+    return missing
+
+
+def _is_deepseek_missing_reasoning_error(error: LLMRequestError) -> bool:
+    message = error.message.lower()
+    return "reasoning_content" in message and "thinking mode" in message
+
+
+def _llm_request_error_body(
+    error: LLMRequestError,
+    *,
+    payload: dict[str, Any] | None = None,
+    is_deepseek: bool = False,
+) -> tuple[dict[str, Any], int]:
+    if is_deepseek and _is_deepseek_missing_reasoning_error(error):
+        missing_call_ids = _deepseek_missing_reasoning_tool_call_ids(payload)
+        message = (
+            "DeepSeek rejected this continuation because thinking-mode tool "
+            "replay requires the original provider reasoning_content."
+        )
+        if missing_call_ids:
+            message += (
+                " Missing reasoning_content for tool call(s): "
+                f"{', '.join(missing_call_ids)}."
+            )
+        message += f" Provider message: {error.message}"
+        return {
+            "error": {
+                "type": "invalid_request_error",
+                "code": "deepseek_missing_reasoning_content",
+                "message": message,
+                "provider_status": error.status_code,
+            }
+        }, 409
+
+    status_code = error.status_code if 400 <= error.status_code < 500 else 502
+    return {
+        "error": {
+            "type": "provider_error",
+            "code": "provider_error",
+            "message": error.message,
+            "provider_status": error.status_code,
+        }
+    }, status_code
+
+
+def _tool_call_ids_from_response_items(items: list[dict[str, Any]]) -> set[str]:
+    call_ids: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") not in {"function_call", "custom_tool_call"}:
+            continue
+        call_id = item.get("call_id") or item.get("id")
+        if isinstance(call_id, str) and call_id:
+            call_ids.add(call_id)
+    return call_ids
+
+
+def _merge_deepseek_provider_states(
+    *states: dict[str, Any] | None,
+) -> dict[str, dict[str, str]]:
+    merged: dict[str, str] = {}
+    for state in states:
+        if not isinstance(state, dict):
+            continue
+        reasoning_by_call_id = state.get("reasoning_by_call_id", {})
+        if not isinstance(reasoning_by_call_id, dict):
+            continue
+        for call_id, reasoning_content in reasoning_by_call_id.items():
+            if call_id and reasoning_content:
+                merged[str(call_id)] = str(reasoning_content)
+    return {"reasoning_by_call_id": merged}
+
+
 def convert_chat_tool_to_responses(tool: dict[str, Any]) -> dict[str, Any]:
     """Convert Chat Completions tool format → Responses API format.
 
@@ -722,7 +818,7 @@ def responses_api() -> tuple[Any, int]:
 
         state_machine = ResponsesStateMachine(_sessions)
         turn = state_machine.ingest_request(data, model)
-        provisional_adapter = DeepSeekChatAdapter()
+        provisional_adapter = OpenAIChatAdapter()
         messages = turn.to_chat_messages(provisional_adapter.flatten_response_items)
         model_type, upstream_name, base_url, api_key, upstream_model = _resolve(model, data, messages)
         is_deepseek = _is_deepseek_upstream(upstream_name, base_url)
@@ -730,9 +826,33 @@ def responses_api() -> tuple[Any, int]:
         tool_type_map = chat_adapter.tool_type_map(tools_raw)
         inject_mcp = (model_type == "mcp_first")
         if is_deepseek:
-            chat_adapter.load_provider_state(
-                turn.session.provider_state.get("deepseek"),
+            call_ids = _tool_call_ids_from_response_items(
+                [*turn.session.items, *turn.input_items],
             )
+            recovered_provider_state = _sessions.provider_state_for_call_ids(
+                "deepseek",
+                call_ids,
+            )
+            session_provider_state = turn.session.provider_state.get("deepseek")
+            chat_adapter.load_provider_state(
+                _merge_deepseek_provider_states(
+                    recovered_provider_state,
+                    session_provider_state,
+                ),
+            )
+            recovered_call_ids = sorted(
+                set(
+                    recovered_provider_state.get(
+                        "reasoning_by_call_id",
+                        {},
+                    )
+                )
+            )
+            if recovered_call_ids:
+                log_debug("DEEPSEEK_PROVIDER_STATE_RECOVERY", {
+                    "recovered_call_ids": recovered_call_ids,
+                    "session_had_provider_state": bool(session_provider_state),
+                })
         messages = turn.to_chat_messages(chat_adapter.flatten_response_items)
 
         # Prepend instructions as system message
@@ -910,6 +1030,22 @@ def responses_api() -> tuple[Any, int]:
         })
         return jsonify(e.to_error_dict()), e.status_code
 
+    except LLMRequestError as e:
+        payload_for_error = locals().get("payload")
+        is_deepseek_for_error = bool(locals().get("is_deepseek", False))
+        error_body, status_code = _llm_request_error_body(
+            e,
+            payload=payload_for_error,
+            is_deepseek=is_deepseek_for_error,
+        )
+        log_debug("CLIENT_RESPONSE /v1/responses", {
+            "status": "provider_error",
+            "error_code": error_body["error"].get("code"),
+            "error": error_body["error"].get("message"),
+            "provider_status": e.status_code,
+        })
+        return jsonify(error_body), status_code
+
     except Exception:
         logger.exception("Error in responses_api")
         return jsonify({
@@ -991,6 +1127,26 @@ def chat_completions() -> tuple[Any, int]:
         })
 
         return jsonify(response), 200
+
+    except LLMRequestError as e:
+        payload_for_error = locals().get("payload")
+        upstream_name_for_error = str(locals().get("upstream_name", ""))
+        base_url_for_error = str(locals().get("base_url", ""))
+        error_body, status_code = _llm_request_error_body(
+            e,
+            payload=payload_for_error,
+            is_deepseek=_is_deepseek_upstream(
+                upstream_name_for_error,
+                base_url_for_error,
+            ),
+        )
+        log_debug("CLIENT_RESPONSE /v1/chat/completions", {
+            "status": "provider_error",
+            "error_code": error_body["error"].get("code"),
+            "error": error_body["error"].get("message"),
+            "provider_status": e.status_code,
+        })
+        return jsonify(error_body), status_code
 
     except Exception:
         logger.exception("Error in chat_completions")

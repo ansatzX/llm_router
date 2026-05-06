@@ -3,7 +3,9 @@
 import os
 from unittest.mock import Mock, patch
 
-from llm_router.llm_client import make_llm_request
+import pytest
+
+from llm_router.llm_client import LLMRequestError, make_llm_request
 
 
 def test_missing_sampling_params_are_not_injected(mock_llm_response):
@@ -102,6 +104,38 @@ def test_reasoning_effort_and_service_tier_are_sent_as_standard_chat_params(
         assert call_kwargs["reasoning_effort"] == "medium"
         assert call_kwargs["service_tier"] == "priority"
         assert "extra_body" not in call_kwargs
+
+
+def test_provider_error_status_and_body_are_preserved():
+    """SDK status errors should remain diagnosable at the server boundary."""
+
+    class ProviderStatusError(Exception):
+        status_code = 400
+        body = {
+            "error": {
+                "message": "bad request from provider",
+                "type": "invalid_request_error",
+                "code": "invalid_request_error",
+            }
+        }
+
+    with patch("llm_router.llm_client._get_client") as mock_get_client:
+        mock_client = Mock()
+        mock_client.chat.completions.create.side_effect = ProviderStatusError()
+        mock_get_client.return_value = mock_client
+
+        payload = {
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Hello"}],
+        }
+
+        with pytest.raises(LLMRequestError) as excinfo:
+            make_llm_request(payload, "http://localhost:8000", None)
+
+    error = excinfo.value
+    assert error.status_code == 400
+    assert error.message == "bad request from provider"
+    assert error.body == ProviderStatusError.body
 
 
 def test_env_vars_with_invalid_values():

@@ -7,6 +7,29 @@ import llm_router.session_store as session_store_mod
 from llm_router.session_store import SessionStore
 
 
+def test_default_store_path_uses_startup_directory(tmp_path, monkeypatch):
+    """Default session state should stay local to the router process cwd."""
+    monkeypatch.delenv("LLM_ROUTER_SESSION_STORE", raising=False)
+    monkeypatch.chdir(tmp_path)
+
+    store = SessionStore(ttl_seconds=3600)
+
+    assert store.store_path == tmp_path / ".llm-router" / "sessions.json"
+
+
+def test_store_path_can_be_overridden_by_environment(tmp_path, monkeypatch):
+    """Deployments can opt into an explicit durable session location."""
+    store_path = tmp_path / "state" / "sessions.json"
+    monkeypatch.setenv("LLM_ROUTER_SESSION_STORE", str(store_path))
+
+    store = SessionStore(ttl_seconds=3600)
+    session = store.create("test-model")
+
+    assert store.store_path == store_path
+    assert store_path.exists()
+    assert store.get(session.response_id) is session
+
+
 def test_session_mutations_are_persisted(tmp_path):
     """New user and assistant items survive store reloads."""
     store_path = tmp_path / "sessions.json"
