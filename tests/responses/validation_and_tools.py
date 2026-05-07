@@ -325,6 +325,76 @@ def test_responses_chat_route_wraps_non_function_tools_for_chat_backend(
         "additionalProperties": False,
     }
 
+def test_responses_chat_route_expands_namespace_tools_for_deepseek(
+    tmp_path,
+    monkeypatch,
+):
+    """Namespace children should be visible to DeepSeek as callable functions."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": "analyze image",
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "mcp__Local_Read__",
+                    "description": "Local Read tools.",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "analyze_image",
+                            "description": "Analyze an image.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"image_path": {"type": "string"}},
+                                "required": ["image_path"],
+                            },
+                        },
+                        {
+                            "type": "function",
+                            "name": "process_binary_file",
+                            "description": "Process a binary file.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"file_path": {"type": "string"}},
+                                "required": ["file_path"],
+                            },
+                        },
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = mock_make_request.call_args.args[0]
+    forwarded_names = [
+        tool["function"]["name"]
+        for tool in payload["tools"]
+    ]
+    assert forwarded_names == [
+        "mcp__Local_Read__analyze_image",
+        "mcp__Local_Read__process_binary_file",
+    ]
+    assert payload["tools"][0]["function"]["description"] == "Analyze an image."
+    assert payload["tools"][0]["function"]["parameters"]["required"] == ["image_path"]
+
 def test_responses_chat_route_returns_chat_tool_calls_as_response_items(
     tmp_path,
     monkeypatch,
@@ -436,6 +506,165 @@ def test_responses_chat_route_restores_custom_tool_calls_as_response_items(
             "input": "*** Begin Patch\n*** End Patch\n",
         }
     ]
+
+def test_responses_chat_route_restores_namespace_tool_calls_as_response_items(
+    tmp_path,
+    monkeypatch,
+):
+    """Flattened DeepSeek calls should regain Codex namespace identity."""
+    client, _ = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_image",
+                                "type": "function",
+                                "function": {
+                                    "name": "mcp__Local_Read__analyze_image",
+                                    "arguments": '{"image_path":"/tmp/input.png"}',
+                                },
+                            },
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": "analyze image",
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "mcp__Local_Read__",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "analyze_image",
+                            "parameters": {"type": "object"},
+                        },
+                    ],
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["output"] == [
+        {
+            "type": "function_call",
+            "id": "call_image",
+            "call_id": "call_image",
+            "namespace": "mcp__Local_Read__",
+            "name": "analyze_image",
+            "arguments": '{"image_path":"/tmp/input.png"}',
+        }
+    ]
+
+def test_responses_chat_route_replays_namespace_tool_calls_flattened_for_deepseek(
+    tmp_path,
+    monkeypatch,
+):
+    """Committed namespace tool calls must replay with DeepSeek-visible names."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_image",
+                                "type": "function",
+                                "function": {
+                                    "name": "mcp__Local_Read__analyze_image",
+                                    "arguments": '{"image_path":"/tmp/input.png"}',
+                                },
+                            },
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+    tools = [
+        {
+            "type": "namespace",
+            "name": "mcp__Local_Read__",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "analyze_image",
+                    "parameters": {"type": "object"},
+                },
+            ],
+        }
+    ]
+
+    first = client.post(
+        "/v1/responses",
+        json={"model": "test-model", "input": "analyze image", "tools": tools},
+    )
+    first_body = first.get_json()
+
+    mock_make_request.reset_mock()
+    mock_make_request.return_value = {
+        "created": 124,
+        "choices": [{"message": {"content": "done"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+    second = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "previous_response_id": first_body["id"],
+            "tools": tools,
+            "input": [
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_image",
+                    "output": "image summary",
+                }
+            ],
+        },
+    )
+
+    assert second.status_code == 200
+    payload = mock_make_request.call_args.args[0]
+    assistant_tool_messages = [
+        message for message in payload["messages"]
+        if message.get("role") == "assistant" and message.get("tool_calls")
+    ]
+    assert assistant_tool_messages[0]["tool_calls"][0]["function"]["name"] == (
+        "mcp__Local_Read__analyze_image"
+    )
 
 def test_responses_stream_restores_custom_tool_calls_as_response_items(
     tmp_path,

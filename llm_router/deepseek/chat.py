@@ -155,6 +155,13 @@ class DeepSeekChatAdapter:
         msg_type = msg.get("type")
         if msg_type in ("function_call", "custom_tool_call"):
             name = msg.get("name", "unknown_tool")
+            namespace = msg.get("namespace")
+            if (
+                msg_type == "function_call"
+                and isinstance(namespace, str)
+                and namespace
+            ):
+                name = self.namespaced_chat_tool_name(namespace, str(name))
             call_id = msg.get("call_id") or msg.get("id") or "unknown_call"
             arguments = msg.get("arguments", msg.get("input", ""))
             converted = {
@@ -352,6 +359,9 @@ class DeepSeekChatAdapter:
             if tool.get("type") == "function":
                 converted.append(self.response_tool_to_chat(tool))
                 continue
+            if tool.get("type") == "namespace":
+                converted.extend(self.namespace_tool_to_chat(tool))
+                continue
             name = tool.get("name") or tool.get("type", "unknown_tool")
             converted.append({
                 "type": "function",
@@ -382,6 +392,34 @@ class DeepSeekChatAdapter:
         })
         return converted
 
+    def namespace_tool_to_chat(self, tool: dict[str, Any]) -> list[dict[str, Any]]:
+        """Expand a Responses namespace into DeepSeek Chat function tools."""
+        namespace = tool.get("name")
+        if not isinstance(namespace, str) or not namespace:
+            return []
+        converted = []
+        for child in tool.get("tools", []):
+            if not isinstance(child, dict) or child.get("type") != "function":
+                continue
+            child_name = child.get("name")
+            if not isinstance(child_name, str) or not child_name:
+                continue
+            converted.append({
+                "type": "function",
+                "function": {
+                    "name": self.namespaced_chat_tool_name(namespace, child_name),
+                    "description": child.get("description", ""),
+                    "parameters": child.get("parameters", {}),
+                },
+            })
+        return converted
+
+    def namespaced_chat_tool_name(self, namespace: str, name: str) -> str:
+        """Return Codex's flat model-visible name for a namespaced tool."""
+        if namespace.endswith("_") or name.startswith("_"):
+            return f"{namespace}{name}"
+        return f"{namespace}_{name}"
+
     def response_tool_to_chat(self, tool: dict[str, Any]) -> dict[str, Any]:
         """Convert a Responses function tool to Chat function format."""
         if tool.get("type") == "function":
@@ -398,7 +436,7 @@ class DeepSeekChatAdapter:
                 }
         return tool
 
-    def tool_type_map(self, tools: list[dict[str, Any]]) -> dict[str, str]:
+    def tool_type_map(self, tools: list[dict[str, Any]]) -> dict[str, Any]:
         """Map Chat function names back to original Responses tool types."""
         mapping = {}
         for tool in tools:
@@ -407,6 +445,18 @@ class DeepSeekChatAdapter:
                 name = tool.get("function", {}).get("name")
             if name:
                 mapping[name] = tool.get("type", "function")
+            if tool.get("type") == "namespace" and isinstance(name, str):
+                for child in tool.get("tools", []):
+                    if not isinstance(child, dict) or child.get("type") != "function":
+                        continue
+                    child_name = child.get("name")
+                    if not isinstance(child_name, str) or not child_name:
+                        continue
+                    mapping[self.namespaced_chat_tool_name(name, child_name)] = {
+                        "type": "namespace_function",
+                        "namespace": name,
+                        "name": child_name,
+                    }
         return mapping
 
     def chat_tool_arguments_to_custom_input(self, arguments: Any) -> str:
@@ -456,13 +506,26 @@ class DeepSeekChatAdapter:
                 tool_name = function.get("name", "")
                 arguments = function.get("arguments", "")
 
-                if tool_type_map.get(tool_name) == "custom":
+                tool_mapping = tool_type_map.get(tool_name)
+                if tool_mapping == "custom":
                     item = {
                         "type": "custom_tool_call",
                         "id": call_id,
                         "call_id": call_id,
                         "name": tool_name,
                         "input": self.chat_tool_arguments_to_custom_input(arguments),
+                    }
+                elif (
+                    isinstance(tool_mapping, dict)
+                    and tool_mapping.get("type") == "namespace_function"
+                ):
+                    item = {
+                        "type": "function_call",
+                        "id": call_id,
+                        "call_id": call_id,
+                        "namespace": tool_mapping.get("namespace", ""),
+                        "name": tool_mapping.get("name", tool_name),
+                        "arguments": arguments,
                     }
                 else:
                     item = {

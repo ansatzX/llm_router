@@ -122,7 +122,7 @@ them to DeepSeek chat models.
 ## Tool Semantics
 
 Codex can send Responses tools that are not native Chat `function` tools, such
-as `custom`, and hosted Responses tools such as `web_search`.
+as `custom` and `namespace`, and hosted Responses tools such as `web_search`.
 
 Router rule:
 
@@ -134,6 +134,12 @@ Router rule:
 
 For DeepSeek official Chat API, all upstream tools must end up as
 `tools[].type == "function"`.
+
+Namespace tools are groups, not freeform tool entrypoints. For Chat providers,
+expand namespace children into callable functions at the provider boundary.
+When the provider returns a flattened namespaced call, restore it as a
+Responses `function_call` with the original `namespace` and child `name` so
+Codex can dispatch the MCP handler by namespace plus tool name.
 
 ## Stateful Responses Rules
 

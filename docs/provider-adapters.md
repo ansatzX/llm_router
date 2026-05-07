@@ -92,6 +92,20 @@ Good behavior:
 - restore Codex-facing output items after the provider response
 - keep stable `call_id` values across call and output
 
+For DeepSeek Chat routes, Responses `namespace` tools are not provider-native
+tools. Expand each namespace child function into a Chat `function` using the
+same flat model-visible name that Codex uses for namespaced code-mode tools,
+for example `mcp__Local_Read__analyze_image`. Keep the child tool's
+description and JSON schema. When DeepSeek returns one of those flattened tool
+calls, restore the Codex-facing item as a Responses `function_call` with both
+`namespace` and the child `name`, such as `namespace: "mcp__Local_Read__"` and
+`name: "analyze_image"`.
+
+Historical namespace tool calls must also replay to DeepSeek with the flattened
+provider-visible name. The committed Responses item can keep the Codex
+namespace shape, but the Chat replay sent upstream must match the tool name
+DeepSeek saw when it created the call.
+
 ## Provider Sidecars
 
 Some providers require metadata that Codex does not echo back. DeepSeek thinking

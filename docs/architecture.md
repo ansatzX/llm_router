@@ -119,10 +119,16 @@ Current DeepSeek behavior:
 - maps `reasoning.effort` to Chat-compatible `reasoning_effort`
 - normalizes `developer` role for Chat backends
 - rewrites Codex `custom` tools into Chat `function` tools
+- expands Codex `namespace` child tools into provider-visible Chat
+  `function` tools
 - filters unsupported hosted Responses tools such as `web_search` on DeepSeek
   routes, producing an empty/no-op provider tool surface instead of a 400
 - restores wrapped custom calls as Responses output items
+- restores flattened namespace child calls as Responses `function_call` items
+  with `namespace` and child `name`
 - persists and replays `reasoning_content` required by DeepSeek thinking mode
+- replays historical namespace tool calls with the same flattened Chat function
+  names that DeepSeek saw when the calls were created
 - recovers persisted DeepSeek sidecars by tool `call_id` when Codex resends
   full local history without `previous_response_id`
 - reports DeepSeek thinking replay failures as client-visible provider errors
