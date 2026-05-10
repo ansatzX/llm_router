@@ -43,6 +43,78 @@ def iter_sse_events(
                         "delta": content["text"],
                     }
                     yield f"event: response.output_text.delta\ndata: {json.dumps(delta_event)}\n\n"
+        elif item.get("type") == "reasoning":
+            summary_parts = item.get("summary", [])
+            content_parts = item.get("content", [])
+            item_id = item.get("id")
+            added_item = {
+                "type": "reasoning",
+                "summary": [
+                    {key: value for key, value in part.items() if key != "text"}
+                    for part in summary_parts
+                    if isinstance(part, dict)
+                ],
+                "content": [
+                    {key: value for key, value in part.items() if key != "text"}
+                    for part in content_parts
+                    if isinstance(part, dict)
+                ],
+            }
+            if item_id:
+                added_item["id"] = item_id
+
+            added_event = {
+                "type": "response.output_item.added",
+                "output_index": idx,
+                "item": added_item,
+            }
+            yield f"event: response.output_item.added\ndata: {json.dumps(added_event)}\n\n"
+
+            for summary_index, part in enumerate(summary_parts):
+                if not isinstance(part, dict):
+                    continue
+                part_added_event = {
+                    "type": "response.reasoning_summary_part.added",
+                    "output_index": idx,
+                    "item_id": item_id,
+                    "summary_index": summary_index,
+                    "part": {"type": part.get("type", "summary_text")},
+                }
+                yield (
+                    "event: response.reasoning_summary_part.added\n"
+                    f"data: {json.dumps(part_added_event)}\n\n"
+                )
+                delta = part.get("text")
+                if delta:
+                    summary_delta_event = {
+                        "type": "response.reasoning_summary_text.delta",
+                        "output_index": idx,
+                        "item_id": item_id,
+                        "summary_index": summary_index,
+                        "delta": delta,
+                    }
+                    yield (
+                        "event: response.reasoning_summary_text.delta\n"
+                        f"data: {json.dumps(summary_delta_event)}\n\n"
+                    )
+
+            for content_index, part in enumerate(content_parts):
+                if not isinstance(part, dict):
+                    continue
+                delta = part.get("text")
+                if not delta:
+                    continue
+                content_delta_event = {
+                    "type": "response.reasoning_text.delta",
+                    "output_index": idx,
+                    "item_id": item_id,
+                    "content_index": content_index,
+                    "delta": delta,
+                }
+                yield (
+                    "event: response.reasoning_text.delta\n"
+                    f"data: {json.dumps(content_delta_event)}\n\n"
+                )
         elif item.get("type") in {"function_call", "custom_tool_call"}:
             added_item = dict(item)
             added_item.pop("arguments", None)

@@ -35,12 +35,13 @@ api_key = "not-needed"
 #                 Tools come from Codex, execution happens locally.
 #   "responses" - Stateful. Accumulate conversation items in session store,
 #                 convert to Chat API format, forward to upstream.
+#   "responses_chat"
+#               - Stateful Responses API behavior with an upstream Chat
+#                 Completions adapter (for example official DeepSeek).
 #   "responses_passthrough"
 #               - Provider-owned Responses. Forward to upstream /v1/responses
 #                 with light schema normalization. Use only for providers that
 #                 expose a compatible Responses API and own response state.
-#   "chat"       - Stateless. Convert Responses API input to Chat format,
-#                 forward to upstream. No session accumulation.
 
 # Example third-party DeepSeek-compatible gateway with native Responses. Keep
 # this before the broad "deepseek-*" Chat route because first match wins.
@@ -58,7 +59,7 @@ upstream = "mirothinker"
 
 [[routes]]
 pattern = "deepseek-*"
-type = "chat"
+type = "responses_chat"
 upstream = "deepseek"
 
 [[routes]]

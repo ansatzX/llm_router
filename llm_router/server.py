@@ -162,7 +162,7 @@ def _resolve(
 ) -> tuple[str, str, str, str, str]:
     """Resolve model name → routing info.
 
-    model_type: "mcp_first" | "responses" | "chat"
+    model_type: "mcp_first" | "responses" | "responses_chat"
     """
     model_type, upstream, upstream_model = _config.resolve_request(model)
     upstream_name = next(
@@ -182,7 +182,7 @@ def _resolve(
             "subagent_header": request.headers.get("x-openai-subagent"),
         })
         return (
-            "chat",
+            "responses_chat",
             "deepseek",
             deepseek.base_url,
             deepseek.resolve_api_key(),

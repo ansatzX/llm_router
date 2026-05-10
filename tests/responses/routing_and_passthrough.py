@@ -16,7 +16,7 @@ def test_responses_chat_route_forwards_codex_tools_as_chat_tools(tmp_path, monke
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -76,7 +76,7 @@ def test_responses_deepseek_route_filters_responses_metadata(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -208,7 +208,7 @@ def test_responses_can_rewrite_requested_model_to_provider_model(
     server_mod._config.routes = [
         RouteConfig(
             pattern="gpt-*",
-            model_type="chat",
+            model_type="responses_chat",
             upstream="deepseek",
             upstream_model="deepseek-v4-flash",
         )

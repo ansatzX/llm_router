@@ -53,30 +53,30 @@ api_key_env = "DEEPSEEK_API_KEY"
 
 [[routes]]
 pattern = "deepseek-v4-pro"
-type = "chat"
+type = "responses_chat"
 upstream = "deepseek"
 upstream_model = "deepseek-reasoner"
 
 [[routes]]
 pattern = "deepseek-v4-flash"
-type = "chat"
+type = "responses_chat"
 upstream = "deepseek"
 upstream_model = "deepseek-chat"
 
 [[routes]]
 pattern = "gpt-5.4-mini"
-type = "chat"
+type = "responses_chat"
 upstream = "deepseek"
 upstream_model = "deepseek-chat"
 
 [[routes]]
 pattern = "gpt-5.4"
-type = "chat"
+type = "responses_chat"
 upstream = "deepseek"
 upstream_model = "deepseek-reasoner"
 
 [default_route]
-type = "chat"
+type = "responses_chat"
 upstream = "deepseek"
 """.lstrip(),
         encoding="utf-8",

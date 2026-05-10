@@ -3,13 +3,13 @@
 from llm_router.config import RouterConfig
 
 
-def test_deepseek_models_route_as_plain_chat():
-    """DeepSeek should keep Codex function/tool protocol, not MCP-first XML."""
+def test_deepseek_models_route_as_responses_chat():
+    """DeepSeek routes through stateful Responses with Chat upstream adapter."""
     cfg = RouterConfig.from_toml("router.toml")
 
     model_type, upstream = cfg.resolve("deepseek-chat")
 
-    assert model_type == "chat"
+    assert model_type == "responses_chat"
     assert upstream.base_url == "https://api.deepseek.com"
 
 
@@ -72,7 +72,7 @@ upstream_model = "deepseek-v4-pro"
 
 [[routes]]
 pattern = "deepseek-*"
-type = "chat"
+type = "responses_chat"
 upstream = "deepseek"
 
 [default_route]
@@ -94,7 +94,7 @@ upstream = "deepseek"
     assert gateway_type == "responses_passthrough"
     assert gateway_upstream.base_url == "https://zapi.aicc0.com/v1"
     assert gateway_model == "deepseek-v4-pro"
-    assert official_type == "chat"
+    assert official_type == "responses_chat"
     assert official_upstream.base_url == "https://api.deepseek.com"
     assert official_model == "deepseek-chat"
 

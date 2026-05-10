@@ -40,7 +40,7 @@ def test_responses_chat_route_resumes_pending_tool_call_state(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -121,7 +121,7 @@ def test_responses_accepts_codex_side_channel_between_tool_call_and_output(
             "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -186,7 +186,7 @@ def test_responses_deepseek_legacy_parallel_tool_calls_keep_interleaved_side_cha
             "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -286,7 +286,7 @@ def test_responses_deepseek_persists_provider_reasoning_state(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -350,7 +350,7 @@ def test_responses_deepseek_restores_reasoning_from_provider_state_after_restart
     }
     store.save()
     server_mod._deepseek_adapter.reset()
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -426,7 +426,7 @@ def test_responses_deepseek_missing_reasoning_provider_error_is_client_visible(
             }
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -487,7 +487,7 @@ def test_responses_deepseek_recovers_reasoning_for_stateless_codex_replay(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -586,7 +586,7 @@ def test_responses_deepseek_provider_state_survives_session_store_reload(
         },
     )
     store_path = server_mod._sessions.store_path
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -625,7 +625,7 @@ def test_responses_deepseek_plain_message_reasoning_is_not_content_keyed_sidecar
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -673,7 +673,7 @@ def test_responses_does_not_mutate_session_when_upstream_fails(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -805,7 +805,7 @@ def test_responses_non_deepseek_route_does_not_receive_deepseek_reasoning_cache(
         "call_cached",
         "leaked reasoning",
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.default_upstream = "default"
 
     response = client.post(

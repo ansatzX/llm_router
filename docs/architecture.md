@@ -58,9 +58,10 @@ Codex /v1/responses request
 For `/v1/responses`, normal router-owned routes go through local Responses
 state. Route type decides provider conversion behavior:
 
-- `chat`: Chat-compatible provider adapter
 - `mcp_first`: MiroThinker MCP XML prompt and parser
 - `responses`: generic OpenAI-compatible behavior where configured
+- `responses_chat`: stateful Responses semantics with Chat upstream adapter
+  (for example official DeepSeek)
 - `responses_passthrough`: provider-owned native Responses. The router forwards
   to upstream `/v1/responses` after light tool schema normalization and does not
   create local response state for those provider-owned response IDs.
@@ -110,8 +111,9 @@ provider-owned response ID through the local state machine.
 
 ### DeepSeek
 
-DeepSeek is a Chat API route with provider-specific filtering and reconstruction.
-Official DeepSeek at `https://api.deepseek.com` must stay on this Chat route.
+DeepSeek uses a `responses_chat` route with provider-specific filtering and
+reconstruction over the upstream Chat API. Official DeepSeek at
+`https://api.deepseek.com` must stay on this Chat-adapter path.
 
 Current DeepSeek behavior:
 

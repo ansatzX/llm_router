@@ -9,7 +9,12 @@ from pathlib import Path
 
 import tomllib
 
-ROUTE_TYPES = {"chat", "mcp_first", "responses", "responses_passthrough"}
+ROUTE_TYPES = {
+    "mcp_first",
+    "responses",
+    "responses_chat",
+    "responses_passthrough",
+}
 
 DEFAULT_CONFIG_PATHS = [
     Path("router.toml"),
@@ -34,7 +39,7 @@ class UpstreamConfig:
 @dataclass
 class RouteConfig:
     pattern: str
-    model_type: str = "chat"
+    model_type: str = "responses_chat"
     upstream: str = "default"
     upstream_model: str = ""
 
@@ -87,7 +92,7 @@ class RouterConfig:
         for r_data in data.get("routes", []):
             cfg.routes.append(RouteConfig(
                 pattern=r_data["pattern"],
-                model_type=r_data.get("type", "chat"),
+                model_type=r_data.get("type", "responses_chat"),
                 upstream=r_data.get("upstream", "default"),
                 upstream_model=r_data.get("upstream_model", ""),
             ))

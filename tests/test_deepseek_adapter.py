@@ -291,13 +291,18 @@ def test_deepseek_restores_chat_response_tool_calls_to_responses_items():
     assert tool_calls[0]["id"] == "call_patch"
     assert output_items == [
         {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "edit the file"}],
+            "content": [{"type": "reasoning_text", "text": "edit the file"}],
+        },
+        {
             "type": "custom_tool_call",
             "id": "call_patch",
             "call_id": "call_patch",
             "name": "apply_patch",
             "input": "*** Begin Patch\n*** End Patch\n",
             "reasoning_content": "edit the file",
-        }
+        },
     ]
     assert adapter.reasoning_by_call_id["call_patch"] == "edit the file"
 
@@ -317,10 +322,15 @@ def test_deepseek_restores_plain_chat_response_with_inline_reasoning_only():
     assert tool_calls == []
     assert output_items == [
         {
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "plain response reasoning"}],
+            "content": [{"type": "reasoning_text", "text": "plain response reasoning"}],
+        },
+        {
             "type": "message",
             "role": "assistant",
             "content": [{"type": "output_text", "text": "done"}],
             "reasoning_content": "plain response reasoning",
-        }
+        },
     ]
     assert adapter.dump_provider_state() == {"reasoning_by_call_id": {}}

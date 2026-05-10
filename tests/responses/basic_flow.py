@@ -77,8 +77,8 @@ def test_responses_returns_standard_output_items(tmp_path, monkeypatch):
         }
     ]
 
-def test_responses_returns_reasoning_content_on_message_items(tmp_path, monkeypatch):
-    """DeepSeek non-tool replies can also carry reasoning_content."""
+def test_responses_returns_reasoning_output_item(tmp_path, monkeypatch):
+    """DeepSeek reasoning_content should become a Responses reasoning item."""
     client, _ = _configure_test_app(
         tmp_path,
         monkeypatch,
@@ -96,7 +96,7 @@ def test_responses_returns_reasoning_content_on_message_items(tmp_path, monkeypa
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
 
     response = client.post(
         "/v1/responses",
@@ -105,7 +105,44 @@ def test_responses_returns_reasoning_content_on_message_items(tmp_path, monkeypa
 
     assert response.status_code == 200
     body = response.get_json()
-    assert body["output"][0]["reasoning_content"] == "plain response reasoning"
+    assert body["output"][0] == {
+        "type": "reasoning",
+        "summary": [{"type": "summary_text", "text": "plain response reasoning"}],
+        "content": [{"type": "reasoning_text", "text": "plain response reasoning"}],
+    }
+    assert body["output"][1]["type"] == "message"
+
+
+def test_responses_stream_emits_reasoning_deltas(tmp_path, monkeypatch):
+    """Simulated SSE should expose reasoning deltas for Codex clients."""
+    client, _ = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": "done",
+                        "reasoning_content": "plain response reasoning",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "responses_chat"
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "test-model", "input": "hi", "stream": True},
+    )
+
+    assert response.status_code == 200
+    assert b"response.reasoning_summary_part.added" in response.data
+    assert b"response.reasoning_summary_text.delta" in response.data
+    assert b"response.reasoning_text.delta" in response.data
 
 def test_responses_developer_role_is_forwarded_as_system(tmp_path, monkeypatch):
     """Developer messages are normalized for Chat Completions backends."""

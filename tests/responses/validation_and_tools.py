@@ -38,7 +38,7 @@ def test_responses_rejects_duplicate_tool_call_ids_without_persisting(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
 
     response = client.post(
         "/v1/responses",
@@ -63,7 +63,7 @@ def test_responses_rejects_unknown_tool_output_before_upstream(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
 
     response = client.post(
         "/v1/responses",
@@ -97,7 +97,7 @@ def test_responses_deepseek_ignores_multimodal_input_and_keeps_text(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -138,7 +138,7 @@ def test_responses_deepseek_filters_hosted_web_search_tool_before_upstream(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -171,7 +171,7 @@ def test_responses_generic_chat_does_not_apply_deepseek_unsupported_feature_poli
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.default_upstream = "default"
 
     response = client.post(
@@ -228,7 +228,7 @@ def test_responses_rejects_partial_parallel_tool_outputs_before_upstream(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
 
     first = client.post(
         "/v1/responses",
@@ -271,7 +271,7 @@ def test_responses_chat_route_wraps_non_function_tools_for_chat_backend(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -339,7 +339,7 @@ def test_responses_chat_route_expands_namespace_tools_for_deepseek(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -426,7 +426,7 @@ def test_responses_chat_route_returns_chat_tool_calls_as_response_items(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
 
     response = client.post(
         "/v1/responses",
@@ -477,7 +477,7 @@ def test_responses_chat_route_restores_custom_tool_calls_as_response_items(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
 
     response = client.post(
         "/v1/responses",
@@ -538,7 +538,7 @@ def test_responses_chat_route_restores_namespace_tool_calls_as_response_items(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -609,7 +609,7 @@ def test_responses_chat_route_replays_namespace_tool_calls_flattened_for_deepsee
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -697,7 +697,7 @@ def test_responses_stream_restores_custom_tool_calls_as_response_items(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
 
     response = client.post(
         "/v1/responses",
@@ -753,7 +753,7 @@ def test_responses_chat_route_returns_reasoning_content_on_tool_call_items(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
 
     response = client.post(
         "/v1/responses",
@@ -762,7 +762,12 @@ def test_responses_chat_route_returns_reasoning_content_on_tool_call_items(
 
     assert response.status_code == 200
     body = response.get_json()
-    assert body["output"][0]["reasoning_content"] == "I should list files first."
+    assert body["output"][0] == {
+        "type": "reasoning",
+        "summary": [{"type": "summary_text", "text": "I should list files first."}],
+        "content": [{"type": "reasoning_text", "text": "I should list files first."}],
+    }
+    assert body["output"][1]["reasoning_content"] == "I should list files first."
 
 def test_responses_mirothinker_route_uses_mcp_prompt_not_native_tools(
     tmp_path,

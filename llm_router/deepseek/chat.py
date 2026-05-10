@@ -487,6 +487,13 @@ class DeepSeekChatAdapter:
         native_tool_calls = message.get("tool_calls") or []
 
         output_items: list[dict[str, Any]] = []
+        if reasoning_content:
+            output_items.append({
+                "type": "reasoning",
+                "summary": [{"type": "summary_text", "text": reasoning_content}],
+                "content": [{"type": "reasoning_text", "text": reasoning_content}],
+            })
+
         if response_text:
             item = {
                 "type": "message",
@@ -498,7 +505,10 @@ class DeepSeekChatAdapter:
             output_items.append(item)
 
         if native_tool_calls:
-            output_items = []
+            output_items = [
+                item for item in output_items
+                if item.get("type") == "reasoning"
+            ]
             for tool_call in native_tool_calls:
                 call_id = tool_call.get("id", "")
                 self.record_tool_reasoning(call_id, reasoning_content)

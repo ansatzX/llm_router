@@ -25,7 +25,7 @@ def test_responses_request_diagnostics_prefers_latest_plan_mode_block(
         logged.append((event, data))
 
     monkeypatch.setattr(server_mod, "log_debug", _capture_log)
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -105,7 +105,7 @@ def test_responses_rejects_mutating_exec_command_tool_call_in_plan_mode(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -188,7 +188,7 @@ def test_responses_plan_mode_retries_plain_question_as_request_user_input(
             "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
         },
     ]
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -309,7 +309,7 @@ def test_responses_plan_mode_retries_mutating_exec_command_as_proposed_plan(
             "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
         },
     ]
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
@@ -420,7 +420,7 @@ def test_responses_plan_mode_retries_apply_patch_as_proposed_plan(
             "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
         },
     ]
-    server_mod._config.default_model_type = "chat"
+    server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
