@@ -1,6 +1,7 @@
 """Responses endpoint regression tests."""
 
 import llm_router.server as server_mod
+from llm_router.config import UpstreamConfig
 from llm_router.llm_client import LLMRequestError
 from tests.responses._helpers import _configure_test_app
 
@@ -98,6 +99,10 @@ def test_responses_returns_reasoning_output_item(tmp_path, monkeypatch):
         },
     )
     server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
 
     response = client.post(
         "/v1/responses",
@@ -134,6 +139,10 @@ def test_responses_stream_emits_reasoning_deltas(tmp_path, monkeypatch):
         },
     )
     server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
 
     response = client.post(
         "/v1/responses",
@@ -202,11 +211,10 @@ def test_responses_stream_uses_real_upstream_streaming_for_text_and_reasoning(
         },
     )
     server_mod._config.default_model_type = "responses_chat"
-
-    seen_stream_flag = {"value": None}
+    seen_stream_flag = {"called": False}
 
     def fake_stream(payload, _base_url, _api_key):
-        seen_stream_flag["value"] = payload.get("stream")
+        seen_stream_flag["called"] = True
         yield {
             "choices": [
                 {"delta": {"reasoning_content": "plan "}, "finish_reason": None},
@@ -245,7 +253,7 @@ def test_responses_stream_uses_real_upstream_streaming_for_text_and_reasoning(
     body = response.get_data(as_text=True)
 
     assert response.status_code == 200
-    assert seen_stream_flag["value"] is True
+    assert seen_stream_flag["called"] is True
     assert mock_make_request.call_count == 0
 
     assert '"type": "response.reasoning_summary_text.delta"' in body
@@ -293,3 +301,99 @@ def test_responses_stream_failure_emits_failed_and_does_not_commit(
     assert '"type": "response.failed"' in body
     assert "upstream stream aborted" in body
     assert server_mod._sessions.stats()["session_count"] == 0
+
+
+def test_responses_stream_deepseek_tools_emit_custom_tool_deltas(
+    tmp_path,
+    monkeypatch,
+):
+    """DeepSeek tool-call chunks should stream as Responses tool events."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    def fake_stream(payload, _base_url, _api_key):
+        yield {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "id": "call_patch",
+                                "type": "function",
+                                "function": {
+                                    "name": "apply_patch",
+                                    "arguments": '{"input":"*** Begin Patch\\n',
+                                },
+                            },
+                        ],
+                    },
+                    "finish_reason": None,
+                },
+            ],
+            "usage": None,
+        }
+        yield {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {
+                                "index": 0,
+                                "function": {
+                                    "arguments": "*** End Patch\\n\"}",
+                                },
+                            },
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                },
+            ],
+            "usage": {
+                "prompt_tokens": 3,
+                "completion_tokens": 2,
+                "total_tokens": 5,
+            },
+        }
+
+    monkeypatch.setattr(server_mod, "make_llm_stream_request", fake_stream)
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": "patch it",
+            "stream": True,
+            "tools": [
+                {
+                    "type": "custom",
+                    "name": "apply_patch",
+                    "description": "freeform patch",
+                }
+            ],
+        },
+    )
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert mock_make_request.call_count == 0
+    assert '"type": "response.output_item.added"' in body
+    assert '"type": "custom_tool_call"' in body
+    assert '"type": "response.custom_tool_call_input.delta"' in body
+    assert "*** Begin Patch\\n*** End Patch\\n" in body
+    assert '"type": "response.completed"' in body
+
+    # commit-after-success: successful stream creates one persisted session
+    assert server_mod._sessions.stats()["session_count"] == 1
