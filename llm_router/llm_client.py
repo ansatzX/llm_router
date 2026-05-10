@@ -7,6 +7,7 @@ using the OpenAI SDK with support for non-standard parameters.
 import os
 import threading
 import time
+from collections.abc import Iterator
 from typing import Any
 from urllib.parse import urlparse
 
@@ -267,6 +268,73 @@ def make_llm_request(payload: dict[str, Any], llm_base_url: str, api_key: str | 
             status_code=status_code,
             body=body,
         ) from e
+
+
+def make_llm_stream_request(
+    payload: dict[str, Any],
+    llm_base_url: str,
+    api_key: str | None = None,
+) -> Iterator[dict[str, Any]]:
+    """Make a streaming request to the LLM backend using OpenAI client.
+
+    Yields:
+        Chat completion chunk dicts as they arrive from upstream.
+
+    Raises:
+        LLMRequestError: If creating or reading the upstream stream fails.
+    """
+    client = _get_client(llm_base_url, api_key)
+    params = payload.copy()
+
+    model = params.pop("model", "default")
+    messages = params.pop("messages", [])
+
+    openai_params: dict[str, Any] = {}
+    extra_params: dict[str, Any] = {}
+    for k, v in params.items():
+        if k in OPENAI_PARAMS:
+            openai_params[k] = v
+        else:
+            extra_params[k] = v
+
+    if extra_params:
+        openai_params["extra_body"] = extra_params
+    openai_params["stream"] = True
+
+    log_debug("LLM_STREAM_REQUEST", {
+        "base_url": str(client.base_url),
+        "model": model,
+        "messages": messages,
+        "openai_params": {k: v for k, v in openai_params.items() if k != "extra_body"},
+        "extra_params": extra_params if extra_params else None,
+    })
+
+    def _iter_chunks() -> Iterator[dict[str, Any]]:
+        stream = None
+        try:
+            stream = client.chat.completions.create(
+                model=model,
+                messages=messages,
+                **openai_params,
+            )
+            for chunk in stream:
+                chunk_dict = chunk.model_dump()
+                log_debug("LLM_STREAM_CHUNK", chunk_dict)
+                yield chunk_dict
+        except Exception as e:
+            body = _provider_error_body(e)
+            status_code = _provider_status_code(e)
+            message = _provider_error_message(body, str(e))
+            raise LLMRequestError(
+                message,
+                status_code=status_code,
+                body=body,
+            ) from e
+        finally:
+            if stream is not None and hasattr(stream, "close"):
+                stream.close()
+
+    return _iter_chunks()
 
 
 def make_responses_request(

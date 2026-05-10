@@ -17,13 +17,13 @@ The default route config is in [`router.toml`](router.toml).
 
 | Model pattern | Type | Upstream | Notes |
 | --- | --- | --- | --- |
-| `deepseek-*` | `chat` | `deepseek` | Main supported route. Codex tools are forwarded as Chat `function` tools. |
+| `deepseek-*` | `responses_chat` | `deepseek` | Main supported route. Router keeps Responses state and adapts to upstream Chat `function` tools. |
 | `mirothinker-*` | `mcp_first` | `mirothinker` | MCP-first route. Native tools are converted to an MCP XML prompt. |
 
 Third-party providers that expose a compatible native `/v1/responses` endpoint
 can be configured explicitly with `type = "responses_passthrough"`. Official
-DeepSeek at `https://api.deepseek.com` should stay on the `chat` route because
-this router targets DeepSeek's Chat API there.
+DeepSeek at `https://api.deepseek.com` should stay on the `responses_chat`
+route because this router targets DeepSeek's Chat API there.
 
 ```toml
 [upstream.deepseek]
@@ -42,7 +42,7 @@ upstream_model = "deepseek-v4-pro"
 
 [[routes]]
 pattern = "deepseek-*"
-type = "chat"
+type = "responses_chat"
 upstream = "deepseek"
 ```
 
@@ -61,7 +61,7 @@ where the upstream owns response IDs and continuation state.
 ```mermaid
 flowchart TD
     C[Codex client<br/>OpenAI-style /v1/responses] --> R[llm_router /v1/responses]
-    R --> RESOLVE[Resolve model route<br/>deepseek-* route<br/>type chat<br/>upstream deepseek]
+    R --> RESOLVE[Resolve model route<br/>deepseek-* route<br/>type responses_chat<br/>upstream deepseek]
     RESOLVE --> INGEST[ResponsesStateMachine.ingest_request<br/>normalize input<br/>validate tool outputs<br/>allocate local response_id]
     INGEST --> SESSION[(Local session store<br/>items, pending tool calls,<br/>DeepSeek provider_state)]
     SESSION --> CTX[Build router-owned turn context<br/>recover reasoning_content by call_id<br/>detect Codex collaboration mode]
@@ -231,6 +231,17 @@ uv run llm-router clear -f
 
 Clearing sessions is useful after adapter changes or when a conversation contains
 old incompatible tool-call history.
+
+## Streaming Status
+
+Current `/v1/responses` streaming is simulated SSE over a non-streaming upstream
+request. This preserves the router-owned state-machine guarantee:
+commit session state only after upstream success (`commit-after-success`).
+
+TODO: add real upstream streaming for `/v1/responses` while preserving the same
+`commit-after-success` constraint. Future enhancement can add an optional
+failed-turn snapshot/draft buffer (non-committed) for better UX when streams
+fail mid-turn.
 
 ## Development
 

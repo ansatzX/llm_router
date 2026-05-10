@@ -7,6 +7,7 @@ Routes:
   /health, /liveness, /readiness, /metrics — Health probes
 """
 
+import json
 import logging
 import os
 import time
@@ -38,6 +39,7 @@ from llm_router.llm_client import (
     check_backend_health,
     list_models,
     make_llm_request,
+    make_llm_stream_request,
     make_responses_request,
 )
 from llm_router.mirothinker import MiroThinkerMCPAdapter
@@ -258,6 +260,235 @@ def _build_sse_response(
     """Build SSE streaming response in Responses API format."""
     return Response(
         stream_with_context(iter_sse_events(response_id, output_items, usage)),
+        mimetype="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+def _emit_sse(event_name: str, payload: dict[str, Any]) -> str:
+    return f"event: {event_name}\ndata: {json.dumps(payload)}\n\n"
+
+
+def _streaming_failure_event(
+    response_id: str,
+    message: str,
+) -> str:
+    return _emit_sse(
+        "response.failed",
+        {
+            "type": "response.failed",
+            "response": {
+                "id": response_id,
+                "status": "failed",
+                "error": {"message": message},
+            },
+        },
+    )
+
+
+def _supports_live_upstream_streaming(
+    context: _ResponsesTurnContext,
+    tools_raw: list[dict[str, Any]],
+) -> bool:
+    """Return True when this turn can use real upstream streaming safely.
+
+    Phase 1 scope:
+    - router-owned `/v1/responses` only
+    - no MCP-first rollback parser
+    - no tool-call streaming assembly yet
+    - no Plan-mode retry steering that requires hidden second attempts
+    """
+    if context.inject_mcp:
+        return False
+    if tools_raw:
+        return False
+    return context.collaboration_mode != "Plan"
+
+
+def _live_stream_router_owned_responses(
+    context: _ResponsesTurnContext,
+    payload: dict[str, Any],
+    model: str,
+) -> Response:
+    """Proxy upstream Chat streaming and emit Responses SSE in real time.
+
+    Commit semantics stay unchanged: session state is committed only after the
+    upstream stream completes and the final assistant message is reconstructed.
+    """
+    payload = dict(payload)
+    payload["stream"] = True
+
+    response_id = context.turn.response_id
+    created_ts = int(time.time())
+
+    def _generate() -> Any:
+        reasoning_item_id = f"rsn_{uuid.uuid4().hex[:8]}"
+        message_item_id = f"msg_{uuid.uuid4().hex[:8]}"
+
+        reasoning_started = False
+        reasoning_part_started = False
+        message_started = False
+
+        reasoning_parts: list[str] = []
+        message_parts: list[str] = []
+        usage_raw: dict[str, Any] = {}
+        finish_reason: str | None = None
+
+        yield _emit_sse(
+            "response.created",
+            {
+                "type": "response.created",
+                "response": {"id": response_id},
+            },
+        )
+
+        try:
+            for chunk in make_llm_stream_request(
+                payload,
+                context.base_url,
+                context.api_key,
+            ):
+                choices = chunk.get("choices") or []
+                if choices:
+                    choice = choices[0] if isinstance(choices[0], dict) else {}
+                    delta = choice.get("delta") or {}
+
+                    reasoning_delta = delta.get("reasoning_content")
+                    if isinstance(reasoning_delta, str) and reasoning_delta:
+                        if not reasoning_started:
+                            reasoning_started = True
+                            yield _emit_sse(
+                                "response.output_item.added",
+                                {
+                                    "type": "response.output_item.added",
+                                    "output_index": 0,
+                                    "item": {
+                                        "type": "reasoning",
+                                        "id": reasoning_item_id,
+                                        "summary": [{"type": "summary_text"}],
+                                        "content": [{"type": "reasoning_text"}],
+                                    },
+                                },
+                            )
+                        if not reasoning_part_started:
+                            reasoning_part_started = True
+                            yield _emit_sse(
+                                "response.reasoning_summary_part.added",
+                                {
+                                    "type": "response.reasoning_summary_part.added",
+                                    "output_index": 0,
+                                    "item_id": reasoning_item_id,
+                                    "summary_index": 0,
+                                    "part": {"type": "summary_text"},
+                                },
+                            )
+
+                        reasoning_parts.append(reasoning_delta)
+                        yield _emit_sse(
+                            "response.reasoning_summary_text.delta",
+                            {
+                                "type": "response.reasoning_summary_text.delta",
+                                "output_index": 0,
+                                "item_id": reasoning_item_id,
+                                "summary_index": 0,
+                                "delta": reasoning_delta,
+                            },
+                        )
+                        yield _emit_sse(
+                            "response.reasoning_text.delta",
+                            {
+                                "type": "response.reasoning_text.delta",
+                                "output_index": 0,
+                                "item_id": reasoning_item_id,
+                                "content_index": 0,
+                                "delta": reasoning_delta,
+                            },
+                        )
+
+                    text_delta = delta.get("content")
+                    if isinstance(text_delta, str) and text_delta:
+                        message_index = 1 if reasoning_started else 0
+                        if not message_started:
+                            message_started = True
+                            yield _emit_sse(
+                                "response.output_item.added",
+                                {
+                                    "type": "response.output_item.added",
+                                    "output_index": message_index,
+                                    "item": {
+                                        "type": "message",
+                                        "id": message_item_id,
+                                        "role": "assistant",
+                                        "content": [{"type": "output_text"}],
+                                    },
+                                },
+                            )
+                        message_parts.append(text_delta)
+                        yield _emit_sse(
+                            "response.output_text.delta",
+                            {
+                                "type": "response.output_text.delta",
+                                "output_index": message_index,
+                                "item_id": message_item_id,
+                                "delta": text_delta,
+                            },
+                        )
+
+                    finish_reason = choice.get("finish_reason") or finish_reason
+
+                chunk_usage = chunk.get("usage")
+                if isinstance(chunk_usage, dict):
+                    usage_raw = chunk_usage
+
+            response_message: dict[str, Any] = {}
+            if message_parts:
+                response_message["content"] = "".join(message_parts)
+            else:
+                response_message["content"] = ""
+            if reasoning_parts:
+                response_message["reasoning_content"] = "".join(reasoning_parts)
+
+            llm_response = {
+                "created": created_ts,
+                "choices": [
+                    {
+                        "message": response_message,
+                        "finish_reason": finish_reason or "stop",
+                    },
+                ],
+                "usage": usage_raw,
+            }
+
+            result = _responses_provider_result_from_llm(
+                context,
+                llm_response,
+                parse_result=None,
+                retry_count=0,
+            )
+            response_body = _commit_and_build_responses_body(context, result, model)
+
+            for idx, item in enumerate(result.output_items):
+                item_done_event = {
+                    "type": "response.output_item.done",
+                    "output_index": idx,
+                    "item": item,
+                }
+                yield _emit_sse("response.output_item.done", item_done_event)
+
+            yield _emit_sse(
+                "response.completed",
+                {
+                    "type": "response.completed",
+                    "response": response_body,
+                },
+            )
+        except Exception as exc:
+            logger.exception("Error in live /v1/responses stream")
+            message = getattr(exc, "message", str(exc))
+            yield _streaming_failure_event(response_id, message)
+
+    return Response(
+        stream_with_context(_generate()),
         mimetype="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -727,6 +958,16 @@ def responses_api() -> tuple[Any, int]:
             tools_raw,
         )
         payload = _build_responses_chat_payload(data, context, tools_raw)
+
+        if (
+            client_requested_stream
+            and _supports_live_upstream_streaming(context, tools_raw)
+        ):
+            return _live_stream_router_owned_responses(
+                context,
+                payload,
+                model,
+            )
 
         # ── Run LLM ──
         llm_response, parse_result, retry_count, _response_text = (

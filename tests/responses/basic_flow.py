@@ -1,6 +1,7 @@
 """Responses endpoint regression tests."""
 
 import llm_router.server as server_mod
+from llm_router.llm_client import LLMRequestError
 from tests.responses._helpers import _configure_test_app
 
 
@@ -136,7 +137,12 @@ def test_responses_stream_emits_reasoning_deltas(tmp_path, monkeypatch):
 
     response = client.post(
         "/v1/responses",
-        json={"model": "test-model", "input": "hi", "stream": True},
+        json={
+            "model": "test-model",
+            "input": "hi",
+            "stream": True,
+            "instructions": "# Plan Mode",
+        },
     )
 
     assert response.status_code == 200
@@ -179,3 +185,111 @@ def test_responses_developer_role_is_forwarded_as_system(tmp_path, monkeypatch):
     messages = mock_make_request.call_args.args[0]["messages"]
     assert messages[0] == {"role": "system", "content": "follow policy"}
     assert messages[1] == {"role": "user", "content": "hello"}
+
+
+def test_responses_stream_uses_real_upstream_streaming_for_text_and_reasoning(
+    tmp_path,
+    monkeypatch,
+):
+    """responses_chat text turns should proxy upstream stream=True deltas."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "responses_chat"
+
+    seen_stream_flag = {"value": None}
+
+    def fake_stream(payload, _base_url, _api_key):
+        seen_stream_flag["value"] = payload.get("stream")
+        yield {
+            "choices": [
+                {"delta": {"reasoning_content": "plan "}, "finish_reason": None},
+            ],
+            "usage": None,
+        }
+        yield {
+            "choices": [
+                {"delta": {"reasoning_content": "step"}, "finish_reason": None},
+            ],
+            "usage": None,
+        }
+        yield {
+            "choices": [
+                {"delta": {"content": "Hel"}, "finish_reason": None},
+            ],
+            "usage": None,
+        }
+        yield {
+            "choices": [
+                {"delta": {"content": "lo"}, "finish_reason": "stop"},
+            ],
+            "usage": {
+                "prompt_tokens": 2,
+                "completion_tokens": 2,
+                "total_tokens": 4,
+            },
+        }
+
+    monkeypatch.setattr(server_mod, "make_llm_stream_request", fake_stream)
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "test-model", "input": "hi", "stream": True},
+    )
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    assert seen_stream_flag["value"] is True
+    assert mock_make_request.call_count == 0
+
+    assert '"type": "response.reasoning_summary_text.delta"' in body
+    assert '"delta": "plan "' in body
+    assert '"delta": "step"' in body
+    assert '"type": "response.output_text.delta"' in body
+    assert '"delta": "Hel"' in body
+    assert '"delta": "lo"' in body
+    assert '"type": "response.completed"' in body
+    assert server_mod._sessions.stats()["session_count"] == 1
+
+
+def test_responses_stream_failure_emits_failed_and_does_not_commit(
+    tmp_path,
+    monkeypatch,
+):
+    """Mid-stream upstream failures must not advance local Responses state."""
+    client, _ = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "responses_chat"
+
+    def failing_stream(_payload, _base_url, _api_key):
+        yield {
+            "choices": [{"delta": {"content": "partial"}, "finish_reason": None}],
+            "usage": None,
+        }
+        raise LLMRequestError("upstream stream aborted", status_code=502)
+
+    monkeypatch.setattr(server_mod, "make_llm_stream_request", failing_stream)
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "test-model", "input": "hi", "stream": True},
+    )
+
+    assert response.status_code == 200
+    body = response.get_data(as_text=True)
+    assert '"type": "response.failed"' in body
+    assert "upstream stream aborted" in body
+    assert server_mod._sessions.stats()["session_count"] == 0
