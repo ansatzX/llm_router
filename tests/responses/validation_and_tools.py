@@ -1,8 +1,22 @@
 """Responses endpoint regression tests."""
 
+import json
+
 import llm_router.server as server_mod
 from llm_router.config import UpstreamConfig
 from tests.responses._helpers import _configure_test_app
+
+
+def _sse_payloads(body: str, event_type: str) -> list[dict]:
+    payloads = []
+    current_event = None
+    for line in body.splitlines():
+        if line.startswith("event: "):
+            current_event = line.removeprefix("event: ")
+            continue
+        if line.startswith("data: ") and current_event == event_type:
+            payloads.append(json.loads(line.removeprefix("data: ")))
+    return payloads
 
 
 def test_responses_rejects_duplicate_tool_call_ids_without_persisting(
@@ -718,7 +732,11 @@ def test_responses_stream_restores_custom_tool_calls_as_response_items(
 
     assert response.status_code == 200
     event_stream = response.get_data(as_text=True)
-    assert '"type": "custom_tool_call"' in event_stream
+    added = _sse_payloads(event_stream, "response.output_item.added")
+    deltas = _sse_payloads(event_stream, "response.custom_tool_call_input.delta")
+    assert added[0]["item"]["type"] == "custom_tool_call"
+    assert added[0]["item"]["input"] == ""
+    assert deltas[0]["delta"] == "*** Begin Patch\n*** End Patch\n"
     assert '"input": "*** Begin Patch\\n*** End Patch\\n"' in event_stream
 
 def test_responses_chat_route_returns_reasoning_content_on_tool_call_items(

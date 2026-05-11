@@ -117,8 +117,10 @@ def iter_sse_events(
                 )
         elif item.get("type") in {"function_call", "custom_tool_call"}:
             added_item = dict(item)
-            added_item.pop("arguments", None)
-            added_item.pop("input", None)
+            if item.get("type") == "custom_tool_call":
+                added_item["input"] = ""
+            else:
+                added_item["arguments"] = ""
             added_event = {
                 "type": "response.output_item.added",
                 "output_index": idx,
@@ -127,17 +129,20 @@ def iter_sse_events(
             yield f"event: response.output_item.added\ndata: {json.dumps(added_event)}\n\n"
 
             arguments_delta = item.get("arguments")
+            event_name = "response.function_call_arguments.delta"
             if item.get("type") == "custom_tool_call":
                 arguments_delta = item.get("input")
+                event_name = "response.custom_tool_call_input.delta"
             if arguments_delta:
                 function_event = {
-                    "type": "response.function_call_arguments.delta",
+                    "type": event_name,
                     "output_index": idx,
                     "item_id": item.get("id") or item.get("call_id"),
+                    "call_id": item.get("call_id"),
                     "delta": arguments_delta,
                 }
                 yield (
-                    "event: response.function_call_arguments.delta\n"
+                    f"event: {event_name}\n"
                     f"data: {json.dumps(function_event)}\n\n"
                 )
 

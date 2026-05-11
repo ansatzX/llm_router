@@ -5,21 +5,26 @@ should describe current behavior and verified rules.
 
 ## Priority 1: Stronger Responses SSE
 
-Current streaming is simulated and minimal:
+Current status:
 
-- `response.created`
-- `response.output_item.done`
-- `response.completed`
+- router-owned `responses_chat` now supports real upstream Chat streaming
+  translated into Responses SSE
+- reasoning/text/tool-call deltas stream incrementally
+- session commit remains `commit-after-success`
+- mixed text+tool-call streaming in one turn is intentionally rejected by
+  default, with an experimental opt-in path available
 
 Codex consumes Responses SSE, not Chat Completion chunks. Provider streams must
 be translated into Codex-compatible event ordering.
 
-Recommended phases:
+Recommended next phases:
 
-1. Improve simulated SSE while keeping upstream non-streaming.
-2. Add provider text streaming with local accumulation and final commit.
-3. Accumulate streamed tool-call chunks before exposing complete tool items.
-4. Add custom tool input deltas only after complete tool calls are stable.
+1. Keep strict mixed-stream rejection as default safety behavior.
+2. Validate the `LLM_ROUTER_EXPERIMENTAL_MIXED_STREAM=1` path with live Codex
+   e2e before changing default behavior.
+3. Add optional non-committed failed-turn snapshot/draft buffer for better UX.
+4. TODO: track Codex parser support for `response.function_call_arguments.delta`;
+   until then function tool execution depends on final `response.output_item.done`.
 
 Important ordering rule:
 
@@ -35,6 +40,7 @@ Error mapping still needs verification:
 - `finish_reason = "length"`
 - `finish_reason = "content_filter"`
 - `finish_reason = "insufficient_system_resource"`
+- mixed stream failure paths with partially emitted tool/input deltas
 
 ## Priority 2: Explicit Multimodal Behavior
 

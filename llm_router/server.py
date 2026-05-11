@@ -317,6 +317,7 @@ def _stream_tool_added_item(
             "id": call_id,
             "call_id": call_id,
             "name": tool_name,
+            "input": "",
         }
     if (
         isinstance(tool_mapping, dict)
@@ -328,13 +329,93 @@ def _stream_tool_added_item(
             "call_id": call_id,
             "namespace": tool_mapping.get("namespace", ""),
             "name": tool_mapping.get("name", tool_name),
+            "arguments": "",
         }
     return {
         "type": "function_call",
         "id": call_id,
         "call_id": call_id,
         "name": tool_name,
+        "arguments": "",
     }
+
+
+def _streamed_custom_input_prefix(arguments: str) -> str | None:
+    """Return the stable decoded prefix of a Chat-wrapped custom tool input."""
+    marker = '"input"'
+    marker_pos = arguments.find(marker)
+    if marker_pos < 0:
+        return None
+    colon_pos = arguments.find(":", marker_pos + len(marker))
+    if colon_pos < 0:
+        return None
+    quote_pos = arguments.find('"', colon_pos + 1)
+    if quote_pos < 0:
+        return None
+
+    decoded: list[str] = []
+    i = quote_pos + 1
+    while i < len(arguments):
+        char = arguments[i]
+        if char == '"':
+            return "".join(decoded)
+        if char != "\\":
+            decoded.append(char)
+            i += 1
+            continue
+        if i + 1 >= len(arguments):
+            return "".join(decoded)
+        escaped = arguments[i + 1]
+        if escaped == "n":
+            decoded.append("\n")
+            i += 2
+        elif escaped == "r":
+            decoded.append("\r")
+            i += 2
+        elif escaped == "t":
+            decoded.append("\t")
+            i += 2
+        elif escaped == "b":
+            decoded.append("\b")
+            i += 2
+        elif escaped == "f":
+            decoded.append("\f")
+            i += 2
+        elif escaped in {'"', "\\", "/"}:
+            decoded.append(escaped)
+            i += 2
+        elif escaped == "u":
+            if i + 6 > len(arguments):
+                return "".join(decoded)
+            hex_value = arguments[i + 2:i + 6]
+            try:
+                decoded.append(chr(int(hex_value, 16)))
+            except ValueError:
+                return "".join(decoded)
+            i += 6
+        else:
+            decoded.append(escaped)
+            i += 2
+    return "".join(decoded)
+
+
+def _custom_tool_input_delta(
+    context: _ResponsesTurnContext,
+    arguments: str,
+    emitted_input: str,
+) -> tuple[str, str]:
+    custom_input = _streamed_custom_input_prefix(arguments)
+    if custom_input is None:
+        custom_input = context.chat_adapter.chat_tool_arguments_to_custom_input(arguments)
+        looks_wrapped = arguments.lstrip().startswith("{") and '"input"' in arguments
+        if custom_input == arguments and looks_wrapped:
+            return "", emitted_input
+
+    if custom_input.startswith(emitted_input):
+        return custom_input[len(emitted_input):], custom_input
+    if not emitted_input:
+        return custom_input, custom_input
+    return "", emitted_input
 
 
 def _live_stream_router_owned_responses(
@@ -352,6 +433,10 @@ def _live_stream_router_owned_responses(
 
     response_id = context.turn.response_id
     created_ts = int(time.time())
+    allow_mixed_stream = os.getenv(
+        "LLM_ROUTER_EXPERIMENTAL_MIXED_STREAM",
+        "",
+    ).lower() in {"1", "true", "yes"}
 
     def _generate() -> Any:
         reasoning_item_id = f"rsn_{uuid.uuid4().hex[:8]}"
@@ -365,6 +450,9 @@ def _live_stream_router_owned_responses(
         message_parts: list[str] = []
         tool_states: dict[int, dict[str, Any]] = {}
         tool_order: list[int] = []
+        tool_seen_order: list[int] = []
+        tool_index_by_id: dict[str, int] = {}
+        tool_next_anon_index = -1
         usage_raw: dict[str, Any] = {}
         finish_reason: str | None = None
 
@@ -389,6 +477,10 @@ def _live_stream_router_owned_responses(
 
                     reasoning_delta = delta.get("reasoning_content")
                     if isinstance(reasoning_delta, str) and reasoning_delta:
+                        if message_started or tool_seen_order:
+                            raise LLMRequestError(
+                                "Late streamed reasoning after output items is unsupported.",
+                            )
                         if not reasoning_started:
                             reasoning_started = True
                             yield _emit_sse(
@@ -441,7 +533,7 @@ def _live_stream_router_owned_responses(
 
                     text_delta = delta.get("content")
                     if isinstance(text_delta, str) and text_delta:
-                        if tool_order:
+                        if tool_seen_order and not allow_mixed_stream:
                             raise LLMRequestError(
                                 "Mixed streamed text with streamed tool_calls is unsupported.",
                             )
@@ -474,28 +566,43 @@ def _live_stream_router_owned_responses(
 
                     tool_call_deltas = delta.get("tool_calls")
                     if isinstance(tool_call_deltas, list) and tool_call_deltas:
-                        if message_started or message_parts:
+                        if (message_started or message_parts) and not allow_mixed_stream:
                             raise LLMRequestError(
                                 "Mixed streamed tool_calls with streamed text is unsupported.",
                             )
-                        for fallback_index, tool_call_delta in enumerate(tool_call_deltas):
+                        for tool_call_delta in tool_call_deltas:
                             if not isinstance(tool_call_delta, dict):
                                 continue
+                            call_id = tool_call_delta.get("id")
                             index = tool_call_delta.get("index")
                             if not isinstance(index, int):
-                                index = fallback_index
+                                if isinstance(call_id, str) and call_id in tool_index_by_id:
+                                    index = tool_index_by_id[call_id]
+                                else:
+                                    index = tool_next_anon_index
+                                    tool_next_anon_index -= 1
+                            if (
+                                isinstance(call_id, str)
+                                and call_id
+                                and call_id in tool_index_by_id
+                            ):
+                                index = tool_index_by_id[call_id]
+                            if isinstance(call_id, str) and call_id:
+                                tool_index_by_id[call_id] = index
                             state = tool_states.setdefault(
                                 index,
                                 {
                                     "id": None,
-                                    "call_id": None,
                                     "name": None,
                                     "arguments_parts": [],
+                                    "emitted_argument_parts": 0,
+                                    "custom_input_emitted": "",
                                     "output_index": None,
                                     "added": False,
                                 },
                             )
-                            call_id = tool_call_delta.get("id")
+                            if index not in tool_seen_order:
+                                tool_seen_order.append(index)
                             if isinstance(call_id, str) and call_id:
                                 state["id"] = call_id
 
@@ -508,17 +615,17 @@ def _live_stream_router_owned_responses(
                                 if isinstance(arguments_delta, str):
                                     state["arguments_parts"].append(arguments_delta)
 
-                            if not state["added"] and state.get("name"):
-                                state["call_id"] = (
-                                    state.get("id")
-                                    or f"call_{index}_{uuid.uuid4().hex[:6]}"
-                                )
+                            if (
+                                not state["added"]
+                                and state.get("name")
+                                and state.get("id")
+                            ):
                                 state["output_index"] = (
                                     (1 if reasoning_started else 0) + len(tool_order)
                                 )
                                 added_item = _stream_tool_added_item(
                                     state["name"],
-                                    state["call_id"],
+                                    state["id"],
                                     context.tool_type_map,
                                 )
                                 tool_order.append(index)
@@ -536,24 +643,47 @@ def _live_stream_router_owned_responses(
                                 continue
 
                             arguments_parts = state.get("arguments_parts", [])
-                            if not arguments_parts:
+                            emitted_parts = int(state.get("emitted_argument_parts", 0))
+                            if emitted_parts >= len(arguments_parts):
                                 continue
-                            latest_delta = arguments_parts[-1]
-                            if not latest_delta:
-                                continue
-                            tool_mapping = context.tool_type_map.get(state["name"], "function")
-                            if tool_mapping == "custom":
-                                continue
-                            yield _emit_sse(
-                                "response.function_call_arguments.delta",
-                                {
-                                    "type": "response.function_call_arguments.delta",
-                                    "output_index": state["output_index"],
-                                    "item_id": state["call_id"],
-                                    "call_id": state["call_id"],
-                                    "delta": latest_delta,
-                                },
+                            tool_mapping = context.tool_type_map.get(
+                                state.get("name"),
+                                "function",
                             )
+                            if tool_mapping == "custom":
+                                arguments = "".join(arguments_parts)
+                                custom_delta, emitted_input = _custom_tool_input_delta(
+                                    context,
+                                    arguments,
+                                    str(state.get("custom_input_emitted", "")),
+                                )
+                                if custom_delta:
+                                    yield _emit_sse(
+                                        "response.custom_tool_call_input.delta",
+                                        {
+                                            "type": "response.custom_tool_call_input.delta",
+                                            "output_index": state["output_index"],
+                                            "item_id": state["id"],
+                                            "call_id": state["id"],
+                                            "delta": custom_delta,
+                                        },
+                                    )
+                                    state["custom_input_emitted"] = emitted_input
+                            else:
+                                for arguments_delta in arguments_parts[emitted_parts:]:
+                                    if not arguments_delta:
+                                        continue
+                                    yield _emit_sse(
+                                        "response.function_call_arguments.delta",
+                                        {
+                                            "type": "response.function_call_arguments.delta",
+                                            "output_index": state["output_index"],
+                                            "item_id": state["id"],
+                                            "call_id": state["id"],
+                                            "delta": arguments_delta,
+                                        },
+                                    )
+                            state["emitted_argument_parts"] = len(arguments_parts)
 
                     finish_reason = choice.get("finish_reason") or finish_reason
 
@@ -568,21 +698,20 @@ def _live_stream_router_owned_responses(
                 response_message["content"] = ""
             if reasoning_parts:
                 response_message["reasoning_content"] = "".join(reasoning_parts)
-            if tool_order:
-                native_tool_calls: list[dict[str, Any]] = []
-                for index in tool_order:
+            if tool_seen_order:
+                for index in tool_seen_order:
                     state = tool_states[index]
-                    if not state["added"] and state.get("name"):
-                        state["call_id"] = (
-                            state.get("id")
-                            or f"call_{index}_{uuid.uuid4().hex[:6]}"
-                        )
+                    if not state.get("id"):
+                        state["id"] = f"call_{index}_{uuid.uuid4().hex[:6]}"
+                    if not state["added"]:
+                        if not state.get("name"):
+                            state["name"] = "unknown_tool"
                         state["output_index"] = (1 if reasoning_started else 0) + len(
-                            native_tool_calls
+                            tool_order
                         )
                         added_item = _stream_tool_added_item(
                             state["name"],
-                            state["call_id"],
+                            state["id"],
                             context.tool_type_map,
                         )
                         state["added"] = True
@@ -594,19 +723,22 @@ def _live_stream_router_owned_responses(
                                 "item": added_item,
                             },
                         )
+                        tool_order.append(index)
 
+                native_tool_calls: list[dict[str, Any]] = []
+                for index in tool_order:
+                    state = tool_states[index]
                     arguments = "".join(state.get("arguments_parts", []))
                     tool_name = state.get("name") or "unknown_tool"
-                    call_id = state.get("call_id") or state.get("id")
-                    if not isinstance(call_id, str) or not call_id:
-                        call_id = f"call_{index}_{uuid.uuid4().hex[:6]}"
-                        state["call_id"] = call_id
+                    call_id = state["id"]
 
                     if context.tool_type_map.get(tool_name) == "custom":
-                        custom_input = context.chat_adapter.chat_tool_arguments_to_custom_input(
+                        final_custom_delta, emitted_input = _custom_tool_input_delta(
+                            context,
                             arguments,
+                            str(state.get("custom_input_emitted", "")),
                         )
-                        if custom_input:
+                        if final_custom_delta:
                             yield _emit_sse(
                                 "response.custom_tool_call_input.delta",
                                 {
@@ -614,9 +746,10 @@ def _live_stream_router_owned_responses(
                                     "output_index": state["output_index"],
                                     "item_id": call_id,
                                     "call_id": call_id,
-                                    "delta": custom_input,
+                                    "delta": final_custom_delta,
                                 },
                             )
+                        state["custom_input_emitted"] = emitted_input
 
                     native_tool_calls.append(
                         {

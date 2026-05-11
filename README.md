@@ -234,14 +234,29 @@ old incompatible tool-call history.
 
 ## Streaming Status
 
-Current `/v1/responses` streaming is simulated SSE over a non-streaming upstream
-request. This preserves the router-owned state-machine guarantee:
-commit session state only after upstream success (`commit-after-success`).
+Current `/v1/responses` on router-owned `responses_chat` routes uses real
+upstream Chat streaming (DeepSeek official path) and emits Responses SSE
+incrementally for:
 
-TODO: add real upstream streaming for `/v1/responses` while preserving the same
-`commit-after-success` constraint. Future enhancement can add an optional
-failed-turn snapshot/draft buffer (non-committed) for better UX when streams
-fail mid-turn.
+- reasoning deltas
+- assistant text deltas
+- tool-call argument/input deltas (function + custom)
+
+The router still preserves `commit-after-success`: session state is committed
+only after upstream success.
+
+Current explicit constraint:
+
+- mixed text+tool-call streaming in the same turn is rejected by default
+- `LLM_ROUTER_EXPERIMENTAL_MIXED_STREAM=1` allows the router to process this
+  mixed stream path while preserving commit-after-success
+
+TODO:
+
+- keep default strict behavior until Codex e2e proves stable mixed-stream
+  delta routing
+- track Codex support for `response.function_call_arguments.delta`; current
+  Codex builds execute function tools from final `response.output_item.done`
 
 ## Development
 
