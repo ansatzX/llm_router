@@ -67,7 +67,7 @@ flowchart TD
     RESOLVE --> INGEST[ResponsesStateMachine.ingest_request<br/>normalize input<br/>validate tool outputs<br/>allocate local response_id]
     INGEST --> SESSION[(Local session store<br/>items, pending tool calls,<br/>DeepSeek provider_state)]
     SESSION --> CTX[Build router-owned turn context<br/>recover reasoning_content by call_id<br/>detect Codex collaboration mode]
-    CTX --> ADAPT[DeepSeekChatAdapter<br/>Responses items -> Chat messages<br/>developer -> system<br/>Codex tools -> Chat function tools]
+    CTX --> ADAPT[DeepSeekChatAdapter<br/>DeepSeek payload filter<br/>shared Responses-Chat conversion<br/>developer -> system]
     ADAPT --> FILTER[Filter provider payload<br/>drop unsupported Responses fields<br/>map documented chat params]
     FILTER --> DS[Official DeepSeek Chat API<br/>/chat/completions]
     DS --> PARSE[Parse provider response<br/>content, tool_calls,<br/>reasoning_content]

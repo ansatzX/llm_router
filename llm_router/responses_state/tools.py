@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from llm_router.deepseek import DeepSeekChatAdapter
+from llm_router.chat_adapter_base import ChatCompletionAdapterBase
 
 
 def convert_chat_tool_to_responses(tool: dict[str, Any]) -> dict[str, Any]:
@@ -32,7 +32,7 @@ def convert_chat_tool_to_responses(tool: dict[str, Any]) -> dict[str, Any]:
 
 def convert_responses_tool_to_chat(tool: dict[str, Any]) -> dict[str, Any]:
     """Convert Responses API function tool format to Chat Completions format."""
-    return DeepSeekChatAdapter().response_tool_to_chat(tool)
+    return ChatCompletionAdapterBase().response_tool_to_chat(tool)
 
 
 def _normalize_responses_tools(

@@ -133,7 +133,7 @@ If DeepSeek rejects a continuation because thinking-mode `reasoning_content` is
 missing, return a client-visible provider error and leave the session unchanged.
 Do not silently downgrade thinking mode or fabricate provider reasoning.
 
-For Xiaomi MiMo Chat routes, the same reasoning replay sidecar pattern is used
+For Xiaomi MiMo Chat routes, XiaomiChatAdapter is separate from DeepSeekChatAdapter and only shares the neutral Responses/Chat conversion base. The same reasoning replay sidecar pattern is used
 under `provider_state["xiaomi"]`. Xiaomi documents `thinking.type`, not
 OpenAI/Codex `reasoning_effort`, so the Xiaomi adapter maps Codex
 `none`/`minimal` reasoning to `thinking.type = "disabled"` and other reasoning

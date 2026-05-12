@@ -4,11 +4,11 @@ from __future__ import annotations
 
 from typing import Any
 
+from llm_router.chat_adapter_base import ChatCompletionAdapterBase
 from llm_router.debug_log import log_debug
-from llm_router.deepseek.chat import DeepSeekChatAdapter
 
 
-class OpenAIChatAdapter(DeepSeekChatAdapter):
+class OpenAIChatAdapter(ChatCompletionAdapterBase):
     """Adapter for generic OpenAI-compatible Chat Completions APIs."""
 
     CHAT_REQUEST_PARAMS = {

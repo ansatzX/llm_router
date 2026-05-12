@@ -2,7 +2,12 @@
 
 import json
 
+from llm_router.deepseek import DeepSeekChatAdapter
 from llm_router.xiaomi import XiaomiChatAdapter
+
+
+def test_xiaomi_adapter_does_not_inherit_deepseek_adapter():
+    assert not issubclass(XiaomiChatAdapter, DeepSeekChatAdapter)
 
 
 def test_xiaomi_filters_payload_to_official_chat_params():

@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 import httpx
 from flask import Flask, Response, jsonify, request, stream_with_context
 
+from llm_router.chat_adapter_base import ChatCompletionAdapterBase
 from llm_router.codex_recovery import (
     _append_plan_mode_proposed_plan_feedback,
     _append_plan_mode_retry_feedback,
@@ -92,7 +93,7 @@ class _ResponsesTurnContext:
     upstream_model: str
     is_deepseek: bool
     provider_state_key: str | None
-    chat_adapter: DeepSeekChatAdapter
+    chat_adapter: ChatCompletionAdapterBase
     tool_type_map: dict[str, str]
     inject_mcp: bool
     messages: list[dict[str, Any]]
@@ -233,7 +234,7 @@ def _is_official_deepseek_base_url(base_url: str) -> bool:
     return urlparse(base_url.rstrip("/")).netloc.lower() == "api.deepseek.com"
 
 
-def _chat_adapter_for(upstream_name: str, base_url: str) -> DeepSeekChatAdapter:
+def _chat_adapter_for(upstream_name: str, base_url: str) -> ChatCompletionAdapterBase:
     if _is_deepseek_upstream(upstream_name, base_url):
         return DeepSeekChatAdapter()
     if _is_xiaomi_upstream(upstream_name, base_url):
@@ -998,7 +999,7 @@ def _handle_responses_passthrough(
 
 def _load_reasoning_provider_state(
     turn: ResponsesTurn,
-    chat_adapter: DeepSeekChatAdapter,
+    chat_adapter: ChatCompletionAdapterBase,
     provider_state_key: str,
 ) -> None:
     call_ids = _tool_call_ids_from_response_items(

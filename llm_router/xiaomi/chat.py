@@ -2,9 +2,9 @@
 
 Xiaomi MiMo exposes an OpenAI-compatible Chat Completions API, but its
 documented request surface and thinking/tool replay behavior are provider
-specific. The adapter keeps Xiaomi-specific payload filtering and preserves
-``developer`` messages, while reusing the Responses tool/reasoning conversion
-needed by Codex.
+specific. The adapter owns Xiaomi-specific payload filtering, preserves
+``developer`` messages, and shares only provider-neutral Responses/Chat
+conversion helpers.
 """
 
 from __future__ import annotations
@@ -12,11 +12,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
+from llm_router.chat_adapter_base import ChatCompletionAdapterBase
 from llm_router.debug_log import log_debug
-from llm_router.deepseek import DeepSeekChatAdapter
 
 
-class XiaomiChatAdapter(DeepSeekChatAdapter):
+class XiaomiChatAdapter(ChatCompletionAdapterBase):
     """Adapter for Xiaomi MiMo's official OpenAI-compatible Chat API."""
 
     CHAT_REQUEST_PARAMS = {
