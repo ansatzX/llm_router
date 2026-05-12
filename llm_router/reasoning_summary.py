@@ -2,21 +2,19 @@
 
 from __future__ import annotations
 
-import hashlib
+import json
+import random
+from pathlib import Path
 
-REASONING_SUMMARY_QUOTES = (
-    "少女折寿中",
-    "我思故我在",
-    "大胆假设，小心求证",
-    "知其然，知其所以然",
-    "慢慢想，比较快",
-)
+_QUOTES_PATH = Path(__file__).parent / "quotes.json"
+
+with open(_QUOTES_PATH, encoding="utf-8") as _f:
+    _QUOTES: tuple[str, ...] = tuple(json.load(_f))
 
 
 def reasoning_summary_text(seed: str | None) -> str:
     """Return a short synthetic summary without exposing raw reasoning text."""
     if not seed:
-        return REASONING_SUMMARY_QUOTES[0]
-    digest = hashlib.blake2s(seed.encode("utf-8"), digest_size=2).digest()
-    index = int.from_bytes(digest, "big") % len(REASONING_SUMMARY_QUOTES)
-    return REASONING_SUMMARY_QUOTES[index]
+        return random.choice(_QUOTES)
+    digest = int.from_bytes(seed.encode("utf-8")[:4], "big")
+    return _QUOTES[digest % len(_QUOTES)]
