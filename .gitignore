@@ -166,3 +166,7 @@ cython_debug/
 # Local test files
 *.local
 *.local.*
+
+.state-machine/
+.scripts/
+.ruff_cache

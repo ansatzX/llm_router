@@ -174,15 +174,18 @@ Current Xiaomi behavior:
   turns
 - converts Codex `function`, `namespace`, and `custom` tools to Chat
   `function` tools
-- forwards Xiaomi-native `web_search` tools using Xiaomi's documented fields
+- treats Xiaomi `web_search` as a Xiaomi-only router built-in hosted tool:
+  Codex hosted search is replaced with an internal `do_web_search` function
+  that the main Xiaomi model may choose to call
 - restores Xiaomi `reasoning_content` as Codex reasoning output items
 - persists and replays Xiaomi thinking/tool sidecars under
   `provider_state["xiaomi"]`
-- converts Xiaomi web-search annotations into a completed Codex
-  `web_search_call` item and keeps citation annotations on final text
-- falls back to non-streaming upstream calls for Xiaomi `web_search` requests
-  until Xiaomi's streamed search-source chunks are translated into Responses
-  SSE
+- runs a separate `mimo-v2-omni` search subrequest only after the model calls
+  `do_web_search`, then feeds the result back as a Chat tool output
+- keeps main-request thinking separate from search retrieval; only the Xiaomi
+  search subrequest uses `thinking.type = "disabled"`
+- returns JSON `null` as the internal tool output when Xiaomi search fails,
+  with provider status and body recorded in debug logs
 
 Audio, TTS, and video-specific Xiaomi semantics are not yet represented as
 Codex-facing Responses behavior.

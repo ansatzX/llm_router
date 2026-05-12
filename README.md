@@ -215,9 +215,10 @@ The adapter currently handles:
 - Structured image content in tool outputs for Xiaomi multimodal follow-up
   turns.
 - Codex `function`, `namespace`, and `custom` tools as Chat `function` tools.
-- Xiaomi native `web_search` tools for live search requests, including a
-  Codex-visible completed `web_search_call` item when Xiaomi returns search
-  annotations.
+- Xiaomi-only router built-in `web_search`: Codex hosted search is exposed to
+  Xiaomi as an internal `do_web_search` function. Only if the model calls it
+  does the router run a separate `mimo-v2-omni` search subrequest and feed the
+  result back as tool output.
 - Xiaomi `reasoning_content` conversion into Codex Responses reasoning items,
   with synthetic display summaries and raw reasoning preserved in Responses
   `content`.
@@ -230,10 +231,12 @@ The adapter targets Codex text, image, tool, and web-search workflows. Xiaomi
 TTS/audio and video understanding are not implemented as Codex-facing semantics
 yet.
 
-Xiaomi `web_search` turns currently use the non-streaming upstream path even
-when Codex requests SSE. The router still returns Responses SSE to Codex, but
-upstream live search-source chunks are left as future work until their event
-shape is translated explicitly.
+Xiaomi `web_search` is provider-specific and must not be generalized to other
+providers. The main Xiaomi model request keeps its normal Codex-derived thinking
+setting and any remaining function tools. The search subrequest uses
+`thinking.type = "disabled"` for cheaper retrieval. If the search subrequest
+fails, the router logs `XIAOMI_BUILTIN_WEB_SEARCH_FAILED`, returns JSON `null`
+as the internal tool output, and lets the main model continue.
 
 The static catalog includes `mimo-v2.5-pro`, `mimo-v2.5`, `mimo-v2-pro`,
 `mimo-v2-omni`, and `mimo-v2-flash`. Image input is enabled only for the MiMo
@@ -244,13 +247,14 @@ only helper shape:
 
 - adapter conversion in [`tests/test_xiaomi_adapter.py`](tests/test_xiaomi_adapter.py)
   for request filtering, `thinking` mapping, `developer` role preservation,
-  image parts, structured tool-output images, web search, annotations, and
-  reasoning replay.
+  image parts, structured tool-output images, Xiaomi web-search conversion,
+  annotations, and reasoning replay.
 - `/v1/responses` behavior in
   [`tests/responses/validation_and_tools.py`](tests/responses/validation_and_tools.py)
-  for multimodal request forwarding, native Xiaomi `web_search`, Codex-visible
-  `web_search_call`, `thinking` mapping, and the conservative non-streaming
-  upstream path for Xiaomi `web_search` turns.
+  for multimodal request forwarding, Xiaomi-only `do_web_search` exposure,
+  main-request `thinking` preservation, internal search continuation,
+  null-on-search-failure behavior, and function-tool preservation after hosted
+  search is replaced.
 - provider sidecar persistence in
   [`tests/responses/state_and_deepseek.py`](tests/responses/state_and_deepseek.py)
   to keep Xiaomi `reasoning_content` replay isolated from DeepSeek state.
@@ -362,7 +366,7 @@ uv run python -m pytest tests/test_server_responses.py -q
 Run focused Xiaomi regressions:
 
 ```bash
-uv run python -m pytest tests/test_xiaomi_adapter.py tests/test_model_catalog.py tests/responses/validation_and_tools.py::test_responses_xiaomi_forwards_multimodal_input_and_web_search_tool tests/responses/validation_and_tools.py::test_responses_xiaomi_maps_none_reasoning_to_disabled_thinking tests/responses/validation_and_tools.py::test_responses_xiaomi_stream_adds_web_search_call_item_before_done tests/responses/state_and_deepseek.py::test_responses_xiaomi_persists_provider_reasoning_state tests/responses/state_and_deepseek.py::test_responses_xiaomi_replays_provider_reasoning_state -q
+uv run python -m pytest tests/test_xiaomi_adapter.py tests/test_model_catalog.py tests/responses/validation_and_tools.py::test_responses_xiaomi_exposes_do_web_search_without_eager_search tests/responses/validation_and_tools.py::test_responses_xiaomi_runs_do_web_search_and_continues_main_request tests/responses/validation_and_tools.py::test_responses_xiaomi_do_web_search_failure_returns_null_tool_output tests/responses/validation_and_tools.py::test_responses_xiaomi_builtin_web_search_keeps_function_tools_on_main_request tests/responses/state_and_deepseek.py::test_responses_xiaomi_persists_provider_reasoning_state tests/responses/state_and_deepseek.py::test_responses_xiaomi_replays_provider_reasoning_state -q
 ```
 
 Run lint:

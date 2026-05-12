@@ -111,6 +111,17 @@ class _ResponsesProviderResult:
     usage: dict[str, Any]
 
 
+@dataclass
+class _BuiltinWebSearchResult:
+    output: str | None
+    usage: dict[str, Any]
+
+
+_XIAOMI_DO_WEB_SEARCH_TOOL_NAME = "do_web_search"
+_XIAOMI_BUILTIN_WEB_SEARCH_MODEL = "mimo-v2-omni"
+_XIAOMI_BUILTIN_TOOL_MAX_ROUNDS = 2
+
+
 def create_app(config_path: str | None = None) -> Flask:
     """Create and configure the Flask application.
 
@@ -1103,6 +1114,226 @@ def _build_responses_chat_payload(
     return _apply_provider_defaults(payload, context.model_type)
 
 
+def _is_active_web_search_tool(tool: Any) -> bool:
+    return (
+        isinstance(tool, dict)
+        and tool.get("type") == "web_search"
+        and tool.get("external_web_access") is not False
+    )
+
+
+def _split_builtin_web_search_tools(
+    tools_raw: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    web_search_tools: list[dict[str, Any]] = []
+    remaining_tools: list[dict[str, Any]] = []
+    for tool in tools_raw:
+        if _is_active_web_search_tool(tool):
+            web_search_tools.append(tool)
+        else:
+            remaining_tools.append(tool)
+    return web_search_tools, remaining_tools
+
+
+def _xiaomi_do_web_search_tool(web_search_tool: dict[str, Any]) -> dict[str, Any]:
+    """Expose Xiaomi hosted search as a model-chosen internal function."""
+    description = (
+        "Search the live web when current or external information is needed. "
+        "Call this tool only when the user request requires web results. "
+        "The router will execute Xiaomi MiMo web_search and return text or null."
+    )
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Focused web search query.",
+            },
+        },
+        "required": ["query"],
+        "additionalProperties": False,
+    }
+    for key in ("max_keyword", "limit", "force_search", "forced_search", "user_location"):
+        if key in web_search_tool:
+            parameters.setdefault("x-xiaomi-web-search-defaults", {})[key] = (
+                web_search_tool[key]
+            )
+    return {
+        "type": "function",
+        "name": _XIAOMI_DO_WEB_SEARCH_TOOL_NAME,
+        "description": description,
+        "parameters": parameters,
+    }
+
+
+def _replace_xiaomi_web_search_with_internal_tool(
+    context: _ResponsesTurnContext,
+    tools_raw: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    if context.provider_state_key != "xiaomi":
+        return None, tools_raw
+    web_search_tools, remaining_tools = _split_builtin_web_search_tools(tools_raw)
+    if not web_search_tools:
+        return None, tools_raw
+    internal_tool = _xiaomi_do_web_search_tool(web_search_tools[0])
+    return web_search_tools[0], [*remaining_tools, internal_tool]
+
+
+def _parse_do_web_search_arguments(arguments: Any) -> str:
+    if isinstance(arguments, str):
+        try:
+            parsed = json.loads(arguments)
+        except json.JSONDecodeError:
+            return arguments.strip()
+    elif isinstance(arguments, dict):
+        parsed = arguments
+    else:
+        return ""
+    if isinstance(parsed, dict):
+        query = parsed.get("query") or parsed.get("input") or parsed.get("q")
+        if isinstance(query, str):
+            return query.strip()
+    return ""
+
+
+def _format_search_annotations(annotations: list[Any]) -> str:
+    lines: list[str] = []
+    for index, annotation in enumerate(annotations, start=1):
+        if not isinstance(annotation, dict):
+            continue
+        title = annotation.get("title") or annotation.get("site_name") or "source"
+        url = annotation.get("url") or ""
+        summary = annotation.get("summary") or ""
+        source = f"{index}. {title}"
+        if url:
+            source = f"{source}: {url}"
+        lines.append(source)
+        if summary:
+            lines.append(f"   {summary}")
+    return "\n".join(lines)
+
+
+def _build_search_context_message(
+    query: str,
+    search_message: dict[str, Any],
+) -> dict[str, str]:
+    content = search_message.get("content") or ""
+    annotations = search_message.get("annotations")
+    if not isinstance(annotations, list):
+        annotations = []
+    sources = _format_search_annotations(annotations)
+    parts = [
+        "Router web search results are available for this turn.",
+        f"Query: {query}",
+    ]
+    if content:
+        parts.extend(["Result:", str(content)])
+    if sources:
+        parts.extend(["Sources:", sources])
+    return {
+        "role": "developer",
+        "content": "\n".join(parts),
+    }
+
+
+def _run_xiaomi_builtin_web_search(
+    data: dict[str, Any],
+    context: _ResponsesTurnContext,
+    web_search_tool: dict[str, Any],
+    query: str,
+) -> _BuiltinWebSearchResult:
+    search_tools = context.chat_adapter.responses_tools_to_chat([web_search_tool])
+    payload = {
+        "model": _XIAOMI_BUILTIN_WEB_SEARCH_MODEL,
+        "messages": [{"role": "user", "content": query}],
+        "stream": False,
+        "tools": search_tools,
+        "tool_choice": "auto",
+        "max_completion_tokens": data.get("max_completion_tokens", 1024),
+        "thinking": {"type": "disabled"},
+    }
+    for key in (
+        "temperature",
+        "top_p",
+        "stop",
+        "frequency_penalty",
+        "presence_penalty",
+    ):
+        if key in data:
+            payload[key] = data[key]
+    payload = context.chat_adapter.filter_request_payload(payload)
+    log_debug("XIAOMI_BUILTIN_WEB_SEARCH_REQUEST", {
+        "model": payload["model"],
+        "query_preview": query[:240],
+        "tool_count": len(payload.get("tools", []) or []),
+    })
+    response = make_llm_request(payload, context.base_url, context.api_key)
+    message = ((response.get("choices") or [{}])[0] or {}).get("message") or {}
+    output = _build_search_context_message(query, message)["content"]
+    return _BuiltinWebSearchResult(
+        output=output if output else None,
+        usage=_responses_usage_from_provider(response.get("usage", {})),
+    )
+
+
+def _run_xiaomi_builtin_web_search_safely(
+    data: dict[str, Any],
+    context: _ResponsesTurnContext,
+    web_search_tool: dict[str, Any] | None,
+    query: str,
+) -> _BuiltinWebSearchResult:
+    empty_usage = _responses_usage_from_provider({})
+    if not web_search_tool:
+        log_debug("XIAOMI_BUILTIN_WEB_SEARCH_SKIPPED", {
+            "reason": "no_xiaomi_web_search_tool",
+            "query_preview": query[:240],
+        })
+        return _BuiltinWebSearchResult(output=None, usage=empty_usage)
+    if not query:
+        log_debug("XIAOMI_BUILTIN_WEB_SEARCH_SKIPPED", {
+            "reason": "empty_query",
+        })
+        return _BuiltinWebSearchResult(output=None, usage=empty_usage)
+    try:
+        return _run_xiaomi_builtin_web_search(
+            data,
+            context,
+            web_search_tool,
+            query,
+        )
+    except LLMRequestError as exc:
+        log_debug("XIAOMI_BUILTIN_WEB_SEARCH_FAILED", {
+            "query_preview": query[:240],
+            "provider_status": exc.status_code,
+            "message": exc.message,
+            "body": exc.body,
+        })
+        return _BuiltinWebSearchResult(output=None, usage=empty_usage)
+
+
+def _combine_responses_usage(
+    first: dict[str, Any],
+    second: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "input_tokens": int(first.get("input_tokens", 0)) + int(second.get("input_tokens", 0)),
+        "input_tokens_details": {
+            "cached_tokens": (
+                int((first.get("input_tokens_details") or {}).get("cached_tokens", 0))
+                + int((second.get("input_tokens_details") or {}).get("cached_tokens", 0))
+            ),
+        },
+        "output_tokens": int(first.get("output_tokens", 0)) + int(second.get("output_tokens", 0)),
+        "output_tokens_details": {
+            "reasoning_tokens": (
+                int((first.get("output_tokens_details") or {}).get("reasoning_tokens", 0))
+                + int((second.get("output_tokens_details") or {}).get("reasoning_tokens", 0))
+            ),
+        },
+        "total_tokens": int(first.get("total_tokens", 0)) + int(second.get("total_tokens", 0)),
+    }
+
+
 def _responses_provider_result_from_llm(
     context: _ResponsesTurnContext,
     llm_response: dict[str, Any],
@@ -1139,6 +1370,93 @@ def _responses_provider_result_from_llm(
         tool_calls_list=tool_calls_list,
         usage=usage,
     )
+
+
+def _find_do_web_search_calls(
+    native_tool_calls: list[dict[str, Any]],
+) -> list[dict[str, str]]:
+    calls: list[dict[str, str]] = []
+    for tool_call in native_tool_calls:
+        function = tool_call.get("function") or {}
+        if function.get("name") != _XIAOMI_DO_WEB_SEARCH_TOOL_NAME:
+            continue
+        calls.append({
+            "id": str(tool_call.get("id") or ""),
+            "query": _parse_do_web_search_arguments(function.get("arguments", "")),
+        })
+    return calls
+
+
+def _append_internal_tool_exchange(
+    payload: dict[str, Any],
+    assistant_message: dict[str, Any],
+    tool_outputs: list[dict[str, Any]],
+) -> None:
+    payload.setdefault("messages", []).append(assistant_message)
+    for tool_output in tool_outputs:
+        payload["messages"].append({
+            "role": "tool",
+            "tool_call_id": tool_output["call_id"],
+            "content": json.dumps(tool_output["output"], ensure_ascii=False),
+        })
+
+
+def _run_xiaomi_internal_tool_loop(
+    data: dict[str, Any],
+    context: _ResponsesTurnContext,
+    payload: dict[str, Any],
+    web_search_tool: dict[str, Any] | None,
+    first_result: _ResponsesProviderResult,
+) -> _ResponsesProviderResult:
+    result = first_result
+    total_tool_usage = _responses_usage_from_provider({})
+    for round_index in range(_XIAOMI_BUILTIN_TOOL_MAX_ROUNDS):
+        calls = _find_do_web_search_calls(result.response_message.get("tool_calls") or [])
+        if not calls:
+            break
+        log_debug("XIAOMI_INTERNAL_WEB_SEARCH_TOOL_CALLS", {
+            "round": round_index + 1,
+            "call_count": len(calls),
+            "queries": [call["query"][:240] for call in calls],
+        })
+        tool_outputs: list[dict[str, Any]] = []
+        for call in calls:
+            search_result = _run_xiaomi_builtin_web_search_safely(
+                data,
+                context,
+                web_search_tool,
+                call["query"],
+            )
+            total_tool_usage = _combine_responses_usage(
+                total_tool_usage,
+                search_result.usage,
+            )
+            tool_outputs.append({
+                "call_id": call["id"],
+                "output": search_result.output,
+            })
+        _append_internal_tool_exchange(
+            payload,
+            result.response_message,
+            tool_outputs,
+        )
+        result = _responses_provider_result_from_llm(
+            context,
+            make_llm_request(payload, context.base_url, context.api_key),
+            None,
+            result.retry_count,
+        )
+    if result.response_message.get("tool_calls"):
+        log_debug("XIAOMI_INTERNAL_TOOL_LOOP_STOPPED", {
+            "reason": "tool_calls_remain_after_max_rounds",
+            "tool_names": [
+                ((tool_call.get("function") or {}).get("name"))
+                for tool_call in result.response_message.get("tool_calls", [])
+                if isinstance(tool_call, dict)
+            ],
+        })
+    result.usage = _combine_responses_usage(total_tool_usage, result.usage)
+    return result
 
 
 def _retry_plan_mode_recoveries(
@@ -1312,7 +1630,11 @@ def responses_api() -> tuple[Any, int]:
             instructions,
             tools_raw,
         )
-        payload = _build_responses_chat_payload(data, context, tools_raw)
+        web_search_tool, main_tools_raw = _replace_xiaomi_web_search_with_internal_tool(
+            context,
+            tools_raw,
+        )
+        payload = _build_responses_chat_payload(data, context, main_tools_raw)
 
         if (
             client_requested_stream
@@ -1330,7 +1652,7 @@ def responses_api() -> tuple[Any, int]:
                 payload,
                 context.base_url,
                 context.api_key,
-                tools,
+                main_tools_raw,
                 context.inject_mcp,
             )
         )
@@ -1339,6 +1661,13 @@ def responses_api() -> tuple[Any, int]:
             llm_response,
             parse_result,
             retry_count,
+        )
+        result = _run_xiaomi_internal_tool_loop(
+            data,
+            context,
+            payload,
+            web_search_tool,
+            result,
         )
         result = _retry_plan_mode_recoveries(
             context,
@@ -1410,7 +1739,7 @@ def chat_completions() -> tuple[Any, int]:
 
         payload = {
             k: v for k, v in data.items()
-            if k not in ("messages", "tools")
+            if k != "messages"
         }
         payload["model"] = upstream_model
         payload["messages"] = messages

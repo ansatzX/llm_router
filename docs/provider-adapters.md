@@ -141,12 +141,14 @@ efforts to `thinking.type = "enabled"`. If a request explicitly contains
 `thinking`, the adapter preserves that provider-native value.
 
 Xiaomi also documents `developer` messages, `image_url` content parts, and a
-native `web_search` hosted tool. Preserve these in the Xiaomi adapter instead
-of applying DeepSeek's stricter downgrade/filtering rules. When Xiaomi returns
-web-search `annotations`, synthesize a completed Responses `web_search_call`
-item so Codex sees that a hosted search occurred, and keep the provider
-annotations on the final text item for clients that understand citation
-metadata.
+native `web_search` hosted tool. Treat Xiaomi `web_search` as a Xiaomi-only
+router built-in hosted tool: replace Codex hosted search with an internal
+`do_web_search` function, let the main Xiaomi model decide whether to call it,
+run a separate Xiaomi search subrequest only when called, and append the result
+as Chat tool output for continuation. Keep main-request `thinking` independent
+from search retrieval; only the Xiaomi search subrequest should use the cheap
+disabled-thinking retrieval setting. If search fails, log provider diagnostics
+and return JSON `null` as the internal tool output.
 
 ## MiroThinker MCP-First
 

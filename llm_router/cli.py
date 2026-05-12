@@ -51,7 +51,12 @@ def cmd_serve(args):
     print(f"  Sessions: {len(server_mod._sessions)} loaded from disk")
 
     from llm_router.server import app
-    app.run(host=cfg.server_host, port=cfg.server_port, debug=args.debug)
+    app.run(
+        host=cfg.server_host,
+        port=cfg.server_port,
+        debug=args.debug,
+        use_reloader=False,
+    )
 
 
 def cmd_clear(args):

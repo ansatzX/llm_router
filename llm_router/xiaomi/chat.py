@@ -9,6 +9,7 @@ needed by Codex.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from llm_router.debug_log import log_debug
@@ -114,11 +115,18 @@ class XiaomiChatAdapter(DeepSeekChatAdapter):
         """Convert Codex/OpenAI web_search options to Xiaomi's documented shape."""
         if tool.get("external_web_access") is False:
             return None
-        converted: dict[str, Any] = {"type": "web_search"}
-        for key in ("max_keyword", "force_search", "limit"):
+        converted: dict[str, Any] = {
+            "type": "web_search",
+            "max_keyword": 3,
+            "force_search": True,
+            "limit": 1,
+        }
+        for key in ("max_keyword", "limit"):
             if key in tool:
                 converted[key] = tool[key]
-        if "force_search" not in converted and "forced_search" in tool:
+        if "force_search" in tool:
+            converted["force_search"] = tool["force_search"]
+        elif "forced_search" in tool:
             converted["force_search"] = tool["forced_search"]
 
         user_location = tool.get("user_location")
@@ -145,7 +153,276 @@ class XiaomiChatAdapter(DeepSeekChatAdapter):
                     converted.append(web_search_tool)
                 continue
             converted.extend(super().responses_tools_to_chat([tool]))
-        return converted
+        sanitized = [self._sanitize_chat_tool(tool) for tool in converted]
+        self._log_tool_diagnostics(tools, converted, sanitized)
+        return sanitized
+
+    def _sanitize_chat_tool(self, tool: dict[str, Any]) -> dict[str, Any]:
+        """Constrain Xiaomi function schemas without changing hosted tools."""
+        if tool.get("type") != "function":
+            return tool
+        function = tool.get("function")
+        if not isinstance(function, dict):
+            return tool
+        sanitized = dict(tool)
+        sanitized_function = dict(function)
+        parameters = sanitized_function.get("parameters")
+        if isinstance(parameters, dict):
+            sanitized_function["parameters"] = self._sanitize_json_schema(parameters)[0]
+        sanitized["function"] = sanitized_function
+        return sanitized
+
+    def _sanitize_json_schema(self, schema: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Return a Xiaomi-friendly schema and whether it was nullable."""
+        any_of = schema.get("anyOf")
+        if isinstance(any_of, list):
+            non_null = [
+                option for option in any_of
+                if not (
+                    isinstance(option, dict)
+                    and option.get("type") == "null"
+                )
+            ]
+            nullable = len(non_null) != len(any_of)
+            selected = self._select_xiaomi_any_of_schema(non_null)
+            if selected is not None:
+                sanitized, child_nullable = self._sanitize_json_schema(selected)
+                merged = {
+                    key: value for key, value in schema.items()
+                    if key not in {"anyOf", "type"}
+                }
+                merged.update({
+                    key: value for key, value in sanitized.items()
+                    if key not in merged
+                })
+                return merged, nullable or child_nullable
+
+        sanitized = dict(schema)
+        nullable = False
+        schema_type = sanitized.get("type")
+        if isinstance(schema_type, list) and "null" in schema_type:
+            non_null_types = [item for item in schema_type if item != "null"]
+            if len(non_null_types) == 1:
+                sanitized["type"] = non_null_types[0]
+                nullable = True
+                schema_type = sanitized["type"]
+
+        properties = sanitized.get("properties")
+        nullable_properties: set[str] = set()
+        if isinstance(properties, dict):
+            sanitized_properties = {}
+            for name, child_schema in properties.items():
+                if isinstance(child_schema, dict):
+                    sanitized_child, child_nullable = self._sanitize_json_schema(
+                        child_schema,
+                    )
+                    sanitized_properties[name] = sanitized_child
+                    if child_nullable:
+                        nullable_properties.add(name)
+                else:
+                    sanitized_properties[name] = child_schema
+            sanitized["properties"] = sanitized_properties
+
+        required = sanitized.get("required")
+        if isinstance(required, list) and nullable_properties:
+            sanitized["required"] = [
+                name for name in required
+                if name not in nullable_properties
+            ]
+
+        items = sanitized.get("items")
+        if isinstance(items, dict):
+            sanitized["items"] = self._sanitize_json_schema(items)[0]
+
+        if sanitized.get("type") == "object":
+            sanitized["additionalProperties"] = False
+
+        return sanitized, nullable
+
+    def _select_xiaomi_any_of_schema(
+        self,
+        options: list[Any],
+    ) -> dict[str, Any] | None:
+        """Collapse JSON Schema unions to one Xiaomi-safe branch.
+
+        Xiaomi's Chat API rejects complex Codex/MCP tool schemas with ``anyOf``.
+        Prefer a string branch for string-or-array tool parameters because the
+        model can still express a single value and avoid invalid upstream JSON.
+        """
+        dict_options = [option for option in options if isinstance(option, dict)]
+        if not dict_options:
+            return None
+        for preferred_type in ("string", "integer", "number", "boolean", "object", "array"):
+            for option in dict_options:
+                if option.get("type") == preferred_type:
+                    return option
+        return dict_options[0]
+
+    def _log_tool_diagnostics(
+        self,
+        input_tools: list[dict[str, Any]],
+        converted_tools: list[dict[str, Any]],
+        sanitized_tools: list[dict[str, Any]],
+    ) -> None:
+        function_names = [
+            tool.get("function", {}).get("name", "")
+            for tool in sanitized_tools
+            if tool.get("type") == "function"
+        ]
+        log_debug("XIAOMI_CHAT_TOOL_DIAGNOSTICS", {
+            "input_tool_count": len(input_tools),
+            "forwarded_tool_count": len(sanitized_tools),
+            "function_count": sum(
+                1 for tool in sanitized_tools
+                if tool.get("type") == "function"
+            ),
+            "web_search_count": sum(
+                1 for tool in sanitized_tools
+                if tool.get("type") == "web_search"
+            ),
+            "max_tool_name_len": max(
+                (len(name) for name in function_names),
+                default=0,
+            ),
+            "schema_bytes_before": self._tool_schema_bytes(converted_tools),
+            "schema_bytes_after": self._tool_schema_bytes(sanitized_tools),
+            "schemas_with_any_of_before": self._count_function_schemas_with(
+                converted_tools,
+                "anyOf",
+            ),
+            "schemas_with_any_of_after": self._count_function_schemas_with(
+                sanitized_tools,
+                "anyOf",
+            ),
+            "schemas_with_null_type_before": self._count_function_schemas_with(
+                converted_tools,
+                '"null"',
+            ),
+            "schemas_with_null_type_after": self._count_function_schemas_with(
+                sanitized_tools,
+                '"null"',
+            ),
+            "object_schemas_missing_additional_properties_before": (
+                self._count_object_schemas_missing_additional_properties(
+                    converted_tools,
+                )
+            ),
+            "object_schemas_missing_additional_properties_after": (
+                self._count_object_schemas_missing_additional_properties(
+                    sanitized_tools,
+                )
+            ),
+            "object_schemas_with_additional_properties_true_before": (
+                self._count_object_schemas_with_additional_properties_true(
+                    converted_tools,
+                )
+            ),
+            "object_schemas_with_additional_properties_true_after": (
+                self._count_object_schemas_with_additional_properties_true(
+                    sanitized_tools,
+                )
+            ),
+        })
+
+    def _tool_schema_bytes(self, tools: list[dict[str, Any]]) -> int:
+        return sum(
+            len(json.dumps(
+                tool.get("function", {}).get("parameters", {}),
+                ensure_ascii=False,
+            ))
+            for tool in tools
+            if tool.get("type") == "function"
+        )
+
+    def _count_function_schemas_with(
+        self,
+        tools: list[dict[str, Any]],
+        marker: str,
+    ) -> int:
+        return sum(
+            1 for tool in tools
+            if tool.get("type") == "function"
+            and marker in json.dumps(
+                tool.get("function", {}).get("parameters", {}),
+                ensure_ascii=False,
+            )
+        )
+
+    def _count_object_schemas_missing_additional_properties(
+        self,
+        tools: list[dict[str, Any]],
+    ) -> int:
+        count = 0
+        for tool in tools:
+            if tool.get("type") != "function":
+                continue
+            parameters = tool.get("function", {}).get("parameters", {})
+            count += self._count_object_schema_nodes_missing_additional_properties(
+                parameters,
+            )
+        return count
+
+    def _count_object_schema_nodes_missing_additional_properties(
+        self,
+        schema: Any,
+    ) -> int:
+        if isinstance(schema, list):
+            return sum(
+                self._count_object_schema_nodes_missing_additional_properties(item)
+                for item in schema
+            )
+        if not isinstance(schema, dict):
+            return 0
+        count = 0
+        if (
+            schema.get("type") == "object"
+            and "additionalProperties" not in schema
+        ):
+            count += 1
+        for value in schema.values():
+            count += self._count_object_schema_nodes_missing_additional_properties(
+                value,
+            )
+        return count
+
+    def _count_object_schemas_with_additional_properties_true(
+        self,
+        tools: list[dict[str, Any]],
+    ) -> int:
+        count = 0
+        for tool in tools:
+            if tool.get("type") != "function":
+                continue
+            parameters = tool.get("function", {}).get("parameters", {})
+            count += self._count_object_schema_nodes_with_additional_properties_true(
+                parameters,
+            )
+        return count
+
+    def _count_object_schema_nodes_with_additional_properties_true(
+        self,
+        schema: Any,
+    ) -> int:
+        if isinstance(schema, list):
+            return sum(
+                self._count_object_schema_nodes_with_additional_properties_true(
+                    item,
+                )
+                for item in schema
+            )
+        if not isinstance(schema, dict):
+            return 0
+        count = 0
+        if (
+            schema.get("type") == "object"
+            and schema.get("additionalProperties") is True
+        ):
+            count += 1
+        for value in schema.values():
+            count += self._count_object_schema_nodes_with_additional_properties_true(
+                value,
+            )
+        return count
 
     def response_item_to_chat(
         self,

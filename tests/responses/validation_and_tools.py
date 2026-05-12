@@ -77,6 +77,32 @@ def test_responses_rejects_unknown_tool_output_before_upstream(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
+    mock_make_request.side_effect = [
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": "found it",
+                        "annotations": [
+                            {
+                                "type": "url_citation",
+                                "url": "https://example.com/weather",
+                                "title": "Weather",
+                            },
+                        ],
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "final"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    ]
     server_mod._config.default_model_type = "responses_chat"
 
     response = client.post(
@@ -171,30 +197,18 @@ def test_responses_deepseek_filters_hosted_web_search_tool_before_upstream(
     payload = mock_make_request.call_args.args[0]
     assert "tools" not in payload
 
-def test_responses_xiaomi_forwards_multimodal_input_and_web_search_tool(
+def test_responses_xiaomi_exposes_do_web_search_without_eager_search(
     tmp_path,
     monkeypatch,
 ):
-    """Xiaomi supports image content parts and its native web_search tool."""
+    """Hosted Xiaomi web_search becomes a model-chosen internal function."""
     client, mock_make_request = _configure_test_app(
         tmp_path,
         monkeypatch,
         {
             "created": 123,
             "choices": [
-                {
-                    "message": {
-                        "content": "found it",
-                        "annotations": [
-                            {
-                                "type": "url_citation",
-                                "url": "https://example.com/weather",
-                                "title": "Weather",
-                            },
-                        ],
-                    },
-                    "finish_reason": "stop",
-                }
+                {"message": {"content": "no search needed"}, "finish_reason": "stop"}
             ],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
@@ -209,19 +223,7 @@ def test_responses_xiaomi_forwards_multimodal_input_and_web_search_tool(
         "/v1/responses",
         json={
             "model": "mimo-v2.5-pro",
-            "input": [
-                {
-                    "type": "message",
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": "describe this"},
-                        {
-                            "type": "input_image",
-                            "image_url": "data:image/png;base64,abc",
-                        },
-                    ],
-                }
-            ],
+            "input": "Improve documentation in @filename",
             "tools": [
                 {
                     "type": "web_search",
@@ -237,45 +239,305 @@ def test_responses_xiaomi_forwards_multimodal_input_and_web_search_tool(
                     },
                 }
             ],
+            "reasoning": {"effort": "high"},
         },
     )
 
     assert response.status_code == 200
-    payload = mock_make_request.call_args.args[0]
-    assert payload["messages"] == [
+    assert mock_make_request.call_count == 1
+    main_payload = mock_make_request.call_args.args[0]
+    assert main_payload["thinking"] == {"type": "enabled"}
+    assert main_payload["tools"] == [
         {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": "describe this"},
-                {
-                    "type": "image_url",
-                    "image_url": {"url": "data:image/png;base64,abc"},
+            "type": "function",
+            "function": {
+                "name": "do_web_search",
+                "description": (
+                    "Search the live web when current or external information is needed. "
+                    "Call this tool only when the user request requires web results. "
+                    "The router will execute Xiaomi MiMo web_search and return text or null."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Focused web search query.",
+                        }
+                    },
+                    "required": ["query"],
+                    "additionalProperties": False,
+                    "x-xiaomi-web-search-defaults": {
+                        "max_keyword": 3,
+                        "limit": 1,
+                        "force_search": True,
+                        "user_location": {
+                            "type": "approximate",
+                            "country": "China",
+                            "region": "Hubei",
+                            "city": "Wuhan",
+                        },
+                    },
                 },
-            ],
-        }
-    ]
-    assert payload["tools"] == [
-        {
-            "type": "web_search",
-            "force_search": True,
-            "max_keyword": 3,
-            "limit": 1,
-            "user_location": {
-                "type": "approximate",
-                "country": "China",
-                "region": "Hubei",
-                "city": "Wuhan",
             },
         }
     ]
     body = response.get_json()
-    assert body["output"][0] == {
-        "type": "web_search_call",
-        "status": "completed",
-    }
-    assert body["output"][1]["content"][0]["annotations"][0]["url"] == (
-        "https://example.com/weather"
+    assert [item["type"] for item in body["output"]] == ["message"]
+    assert body["output"][0]["content"][0]["text"] == "no search needed"
+
+
+def test_responses_xiaomi_runs_do_web_search_and_continues_main_request(
+    tmp_path,
+    monkeypatch,
+):
+    """If Xiaomi chooses do_web_search, router executes search then asks again."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
     )
+    mock_make_request.side_effect = [
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_search",
+                                "type": "function",
+                                "function": {
+                                    "name": "do_web_search",
+                                    "arguments": '{"query":"Wuhan weather tomorrow"}',
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11},
+        },
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": "Wuhan tomorrow weather from search",
+                        "annotations": [
+                            {
+                                "type": "url_citation",
+                                "url": "https://example.com/weather",
+                                "title": "Weather",
+                                "summary": "Wuhan weather summary",
+                            },
+                        ],
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+        },
+        {
+            "created": 123,
+            "choices": [
+                {"message": {"content": "final with search"}, "finish_reason": "stop"}
+            ],
+            "usage": {"prompt_tokens": 8, "completion_tokens": 9, "total_tokens": 17},
+        },
+    ]
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["xiaomi"] = UpstreamConfig(
+        base_url="https://api.xiaomimimo.com",
+    )
+    server_mod._config.default_upstream = "xiaomi"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "mimo-v2.5-pro",
+            "input": "武汉明天天气怎么样？",
+            "tools": [{"type": "web_search", "external_web_access": True}],
+            "reasoning": {"effort": "high"},
+        },
+    )
+
+    assert response.status_code == 200
+    assert mock_make_request.call_count == 3
+    first_payload = mock_make_request.call_args_list[0].args[0]
+    search_payload = mock_make_request.call_args_list[1].args[0]
+    final_payload = mock_make_request.call_args_list[2].args[0]
+    assert first_payload["tools"][0]["function"]["name"] == "do_web_search"
+    assert search_payload["model"] == "mimo-v2-omni"
+    assert search_payload["thinking"] == {"type": "disabled"}
+    assert search_payload["tools"] == [
+        {"type": "web_search", "force_search": True, "max_keyword": 3, "limit": 1}
+    ]
+    assert final_payload["messages"][-2]["tool_calls"][0]["function"]["name"] == (
+        "do_web_search"
+    )
+    assert final_payload["messages"][-1]["role"] == "tool"
+    assert final_payload["messages"][-1]["tool_call_id"] == "call_search"
+    assert "Wuhan tomorrow weather from search" in final_payload["messages"][-1]["content"]
+    assert "https://example.com/weather" in final_payload["messages"][-1]["content"]
+    body = response.get_json()
+    assert [item["type"] for item in body["output"]] == ["message"]
+    assert body["output"][0]["content"][0]["text"] == "final with search"
+
+
+def test_responses_xiaomi_do_web_search_failure_returns_null_tool_output(
+    tmp_path,
+    monkeypatch,
+):
+    """Search failure is debug-logged and returned as null to the main model."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    from llm_router.llm_client import LLMRequestError
+
+    mock_make_request.side_effect = [
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_search",
+                                "type": "function",
+                                "function": {
+                                    "name": "do_web_search",
+                                    "arguments": '{"query":"news"}',
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+        LLMRequestError(
+            "Param Incorrect",
+            status_code=400,
+            body={"error": {"message": "Param Incorrect"}},
+        ),
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "final despite null"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    ]
+    events = []
+    monkeypatch.setattr(server_mod, "log_debug", lambda event, data: events.append((event, data)))
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["xiaomi"] = UpstreamConfig(
+        base_url="https://api.xiaomimimo.com",
+    )
+    server_mod._config.default_upstream = "xiaomi"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "mimo-v2.5-pro",
+            "input": "Search current news",
+            "tools": [{"type": "web_search", "external_web_access": True}],
+        },
+    )
+
+    assert response.status_code == 200
+    final_payload = mock_make_request.call_args_list[2].args[0]
+    assert final_payload["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "call_search",
+        "content": "null",
+    }
+    assert any(
+        event == "XIAOMI_BUILTIN_WEB_SEARCH_FAILED"
+        and data["provider_status"] == 400
+        and data["message"] == "Param Incorrect"
+        for event, data in events
+    )
+    body = response.get_json()
+    assert body["output"][0]["content"][0]["text"] == "final despite null"
+
+
+def test_responses_xiaomi_builtin_web_search_keeps_function_tools_on_main_request(
+    tmp_path,
+    monkeypatch,
+):
+    """Hosted web_search is replaced while normal function tools remain available."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "final"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["xiaomi"] = UpstreamConfig(
+        base_url="https://api.xiaomimimo.com",
+    )
+    server_mod._config.default_upstream = "xiaomi"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "mimo-v2.5-pro",
+            "input": "Need current info",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "local_lookup",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"key": {"type": "string"}},
+                        "required": ["key"],
+                    },
+                },
+                {"type": "web_search", "external_web_access": True},
+            ],
+            "reasoning": {"effort": "high"},
+        },
+    )
+
+    assert response.status_code == 200
+    main_payload = mock_make_request.call_args.args[0]
+    assert [tool["function"]["name"] for tool in main_payload["tools"]] == [
+        "local_lookup",
+        "do_web_search",
+    ]
+    assert main_payload["tools"][0] == {
+        "type": "function",
+        "function": {
+            "name": "local_lookup",
+            "description": "",
+            "parameters": {
+                "type": "object",
+                "properties": {"key": {"type": "string"}},
+                "required": ["key"],
+                "additionalProperties": False,
+            },
+        },
+    }
+    body = response.get_json()
+    assert [item["type"] for item in body["output"]] == ["message"]
+
 
 def test_responses_xiaomi_maps_none_reasoning_to_disabled_thinking(
     tmp_path,
@@ -312,31 +574,17 @@ def test_responses_xiaomi_maps_none_reasoning_to_disabled_thinking(
     assert "reasoning" not in payload
     assert "reasoning_effort" not in payload
 
-def test_responses_xiaomi_stream_adds_web_search_call_item_before_done(
+def test_responses_xiaomi_stream_does_not_eagerly_run_web_search(
     tmp_path,
     monkeypatch,
 ):
-    """Simulated SSE must preserve the hosted web-search item lifecycle."""
+    """Simulated SSE should contain only the model result if search is not chosen."""
     client, mock_make_request = _configure_test_app(
         tmp_path,
         monkeypatch,
         {
             "created": 123,
-            "choices": [
-                {
-                    "message": {
-                        "content": "found it",
-                        "annotations": [
-                            {
-                                "type": "url_citation",
-                                "url": "https://example.com/weather",
-                                "title": "Weather",
-                            },
-                        ],
-                    },
-                    "finish_reason": "stop",
-                }
-            ],
+            "choices": [{"message": {"content": "plain answer"}, "finish_reason": "stop"}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
@@ -364,18 +612,13 @@ def test_responses_xiaomi_stream_adds_web_search_call_item_before_done(
     )
 
     assert response.status_code == 200
-    mock_make_request.assert_called_once()
+    assert mock_make_request.call_count == 1
     body = response.data.decode("utf-8")
     added = _sse_payloads(body, "response.output_item.added")
     done = _sse_payloads(body, "response.output_item.done")
-    assert added[0]["item"] == {
-        "type": "web_search_call",
-        "status": "completed",
-    }
-    assert done[0]["item"] == {
-        "type": "web_search_call",
-        "status": "completed",
-    }
+    assert added[0]["item"]["type"] == "message"
+    assert done[0]["item"]["type"] == "message"
+    assert "web_search_call" not in body
 
 def test_responses_generic_chat_does_not_apply_deepseek_unsupported_feature_policy(
     tmp_path,
