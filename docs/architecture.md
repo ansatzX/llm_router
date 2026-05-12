@@ -131,6 +131,8 @@ Current DeepSeek behavior:
 - restores flattened namespace child calls as Responses `function_call` items
   with `namespace` and child `name`
 - persists and replays `reasoning_content` required by DeepSeek thinking mode
+- exposes provider reasoning to Codex as raw reasoning content while using a
+  short synthetic summary for the Codex summary channel
 - replays historical namespace tool calls with the same flattened Chat function
   names that DeepSeek saw when the calls were created
 - recovers persisted DeepSeek sidecars by tool `call_id` when Codex resends

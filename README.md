@@ -192,7 +192,8 @@ The adapter currently handles:
 - DeepSeek-route filtering for unsupported hosted Responses tools such as
   `web_search`.
 - DeepSeek Chat `tool_calls` back to Codex Responses output items.
-- DeepSeek `reasoning_content` round trip when available.
+- DeepSeek `reasoning_content` round trip when available, with synthetic
+  display summaries and raw reasoning preserved in Responses `content`.
 - Tool-call ordering repairs when Codex inserts side-channel messages between a
   tool call and its tool output.
 - DeepSeek-specific payload filtering so Responses metadata such as
@@ -217,7 +218,9 @@ The adapter currently handles:
 - Xiaomi native `web_search` tools for live search requests, including a
   Codex-visible completed `web_search_call` item when Xiaomi returns search
   annotations.
-- Xiaomi `reasoning_content` conversion into Codex Responses reasoning items.
+- Xiaomi `reasoning_content` conversion into Codex Responses reasoning items,
+  with synthetic display summaries and raw reasoning preserved in Responses
+  `content`.
 - Xiaomi thinking/tool replay state under `provider_state["xiaomi"]`, isolated
   from DeepSeek provider state.
 - Xiaomi web-search `annotations` on final text responses for clients that keep

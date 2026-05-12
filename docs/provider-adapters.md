@@ -112,6 +112,12 @@ Some providers require metadata that Codex does not echo back. DeepSeek thinking
 mode is the current example: multi-round requests must replay
 `reasoning_content`.
 
+Provider `reasoning_content` is raw reasoning, not a provider-authored summary.
+When the router emits Codex Responses reasoning items, keep the raw text in
+`content` and use a short synthetic display string in `summary`. Codex decides
+whether to show raw reasoning, but the router should not label raw provider
+thinking as a semantic summary.
+
 Provider-private metadata should be stored under the session's
 `provider_state`, not in process-global mutable state. Update this sidecar only
 as part of a successful response commit.

@@ -12,6 +12,7 @@ import json
 from typing import Any
 
 from llm_router.debug_log import log_debug
+from llm_router.reasoning_summary import reasoning_summary_text
 
 
 class DeepSeekChatAdapter:
@@ -503,9 +504,13 @@ class DeepSeekChatAdapter:
 
         output_items: list[dict[str, Any]] = []
         if reasoning_content:
+            summary_text = (
+                message.get("reasoning_summary")
+                or reasoning_summary_text(reasoning_content)
+            )
             output_items.append({
                 "type": "reasoning",
-                "summary": [{"type": "summary_text", "text": reasoning_content}],
+                "summary": [{"type": "summary_text", "text": summary_text}],
                 "content": [{"type": "reasoning_text", "text": reasoning_content}],
             })
 

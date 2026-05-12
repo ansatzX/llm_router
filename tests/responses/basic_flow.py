@@ -125,11 +125,14 @@ def test_responses_returns_reasoning_output_item(tmp_path, monkeypatch):
 
     assert response.status_code == 200
     body = response.get_json()
-    assert body["output"][0] == {
-        "type": "reasoning",
-        "summary": [{"type": "summary_text", "text": "plain response reasoning"}],
-        "content": [{"type": "reasoning_text", "text": "plain response reasoning"}],
-    }
+    reasoning = body["output"][0]
+    assert reasoning["type"] == "reasoning"
+    assert reasoning["summary"][0]["type"] == "summary_text"
+    assert reasoning["summary"][0]["text"]
+    assert reasoning["summary"][0]["text"] != "plain response reasoning"
+    assert reasoning["content"] == [
+        {"type": "reasoning_text", "text": "plain response reasoning"},
+    ]
     assert body["output"][1]["type"] == "message"
 
 
@@ -177,9 +180,18 @@ def test_responses_stream_emits_reasoning_deltas(tmp_path, monkeypatch):
     }
     assert added[1]["item"]["type"] == "message"
     assert added[1]["item"]["content"] == [{"type": "output_text", "text": ""}]
+    summary_deltas = _sse_payloads(
+        response.get_data(as_text=True),
+        "response.reasoning_summary_text.delta",
+    )
+    raw_deltas = _sse_payloads(
+        response.get_data(as_text=True),
+        "response.reasoning_text.delta",
+    )
     assert b"response.reasoning_summary_part.added" in response.data
-    assert b"response.reasoning_summary_text.delta" in response.data
-    assert b"response.reasoning_text.delta" in response.data
+    assert summary_deltas[0]["delta"]
+    assert summary_deltas[0]["delta"] != "plain response reasoning"
+    assert raw_deltas[0]["delta"] == "plain response reasoning"
 
 def test_responses_developer_role_is_forwarded_as_system(tmp_path, monkeypatch):
     """Developer messages are normalized for Chat Completions backends."""
@@ -287,9 +299,12 @@ def test_responses_stream_uses_real_upstream_streaming_for_text_and_reasoning(
     }
     assert added[1]["item"]["type"] == "message"
     assert added[1]["item"]["content"] == [{"type": "output_text", "text": ""}]
-    assert '"type": "response.reasoning_summary_text.delta"' in body
-    assert '"delta": "plan "' in body
-    assert '"delta": "step"' in body
+    summary_deltas = _sse_payloads(body, "response.reasoning_summary_text.delta")
+    raw_deltas = _sse_payloads(body, "response.reasoning_text.delta")
+    assert len(summary_deltas) == 1
+    assert summary_deltas[0]["delta"]
+    assert summary_deltas[0]["delta"] not in {"plan ", "step", "plan step"}
+    assert [delta["delta"] for delta in raw_deltas] == ["plan ", "step"]
     assert '"type": "response.output_text.delta"' in body
     assert '"delta": "Hel"' in body
     assert '"delta": "lo"' in body

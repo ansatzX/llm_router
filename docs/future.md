@@ -87,6 +87,35 @@ TODO:
 - decide whether provider-hosted search should expose query/action details when
   the upstream returns only source annotations
 
+## Priority 3.5: Large Namespace Tool Surfaces
+
+Current Chat-backed routes intentionally expand Codex `namespace` tools into
+one provider-visible Chat `function` per namespace child. This preserves MCP
+and app tool semantics because Chat Completions providers do not understand the
+Responses namespace object directly. Do not remove this expansion as a quick
+way to reduce tool count.
+
+Observed Codex traffic can expand a compact namespace surface into a much
+larger Chat tool list, for example tens of Codex tools becoming more than one
+hundred provider functions after MCP/app child tools are exposed. There is no
+verified Xiaomi official numeric tool limit in the current evidence set, but a
+large expanded tool surface can still increase request size, schema prompt
+cost, latency, and provider-specific rejection risk.
+
+Future options:
+
+- add diagnostics for original tool count, expanded tool count, and approximate
+  tool schema bytes
+- add explicit provider policy knobs for namespace allowlists/denylists or a
+  hard cap that fails visibly instead of silently dropping tools
+- prototype a compressed namespace dispatcher that exposes one Chat function
+  per namespace with `{name, arguments}` and lets the router restore the child
+  call for Codex
+
+The dispatcher option is not the default plan. It reduces provider tool count
+but loses per-child schemas and descriptions at the model boundary, so it needs
+live Codex/provider evidence before replacing full expansion.
+
 ## Priority 4: Session Concurrency
 
 `SessionStore` uses a JSON file, process-local locking, advisory file locking,

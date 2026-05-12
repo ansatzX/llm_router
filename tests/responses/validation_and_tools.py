@@ -986,11 +986,14 @@ def test_responses_chat_route_returns_reasoning_content_on_tool_call_items(
 
     assert response.status_code == 200
     body = response.get_json()
-    assert body["output"][0] == {
-        "type": "reasoning",
-        "summary": [{"type": "summary_text", "text": "I should list files first."}],
-        "content": [{"type": "reasoning_text", "text": "I should list files first."}],
-    }
+    reasoning = body["output"][0]
+    assert reasoning["type"] == "reasoning"
+    assert reasoning["summary"][0]["type"] == "summary_text"
+    assert reasoning["summary"][0]["text"]
+    assert reasoning["summary"][0]["text"] != "I should list files first."
+    assert reasoning["content"] == [
+        {"type": "reasoning_text", "text": "I should list files first."},
+    ]
     assert body["output"][1]["reasoning_content"] == "I should list files first."
 
 def test_responses_mirothinker_route_uses_mcp_prompt_not_native_tools(

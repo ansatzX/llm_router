@@ -45,6 +45,7 @@ from llm_router.llm_client import (
 from llm_router.mirothinker import MiroThinkerMCPAdapter
 from llm_router.openai_chat import OpenAIChatAdapter
 from llm_router.provider_errors import _llm_request_error_body
+from llm_router.reasoning_summary import reasoning_summary_text
 from llm_router.responses_state import (
     ResponsesStateError,
     ResponsesStateMachine,
@@ -475,6 +476,7 @@ def _live_stream_router_owned_responses(
         tool_next_anon_index = -1
         usage_raw: dict[str, Any] = {}
         finish_reason: str | None = None
+        reasoning_summary: str | None = None
 
         yield _emit_sse(
             "response.created",
@@ -522,6 +524,7 @@ def _live_stream_router_owned_responses(
                             )
                         if not reasoning_part_started:
                             reasoning_part_started = True
+                            reasoning_summary = reasoning_summary_text(reasoning_delta)
                             yield _emit_sse(
                                 "response.reasoning_summary_part.added",
                                 {
@@ -534,16 +537,18 @@ def _live_stream_router_owned_responses(
                             )
 
                         reasoning_parts.append(reasoning_delta)
-                        yield _emit_sse(
-                            "response.reasoning_summary_text.delta",
-                            {
-                                "type": "response.reasoning_summary_text.delta",
-                                "output_index": 0,
-                                "item_id": reasoning_item_id,
-                                "summary_index": 0,
-                                "delta": reasoning_delta,
-                            },
-                        )
+                        if reasoning_summary:
+                            yield _emit_sse(
+                                "response.reasoning_summary_text.delta",
+                                {
+                                    "type": "response.reasoning_summary_text.delta",
+                                    "output_index": 0,
+                                    "item_id": reasoning_item_id,
+                                    "summary_index": 0,
+                                    "delta": reasoning_summary,
+                                },
+                            )
+                            reasoning_summary = None
                         yield _emit_sse(
                             "response.reasoning_text.delta",
                             {
@@ -722,6 +727,10 @@ def _live_stream_router_owned_responses(
                 response_message["content"] = ""
             if reasoning_parts:
                 response_message["reasoning_content"] = "".join(reasoning_parts)
+                if reasoning_summary is None:
+                    response_message["reasoning_summary"] = reasoning_summary_text(
+                        reasoning_parts[0],
+                    )
             if tool_seen_order:
                 for index in tool_seen_order:
                     state = tool_states[index]
