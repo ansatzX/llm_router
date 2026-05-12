@@ -471,10 +471,6 @@ def _live_stream_router_owned_responses(
 
     response_id = context.turn.response_id
     created_ts = int(time.time())
-    allow_mixed_stream = os.getenv(
-        "LLM_ROUTER_EXPERIMENTAL_MIXED_STREAM",
-        "",
-    ).lower() in {"1", "true", "yes"}
 
     def _generate() -> Any:
         reasoning_item_id = f"rsn_{uuid.uuid4().hex[:8]}"
@@ -579,10 +575,7 @@ def _live_stream_router_owned_responses(
 
                     text_delta = delta.get("content")
                     if isinstance(text_delta, str) and text_delta:
-                        if tool_seen_order and not allow_mixed_stream:
-                            raise LLMRequestError(
-                                "Mixed streamed text with streamed tool_calls is unsupported.",
-                            )
+                        # Allow text after tool_calls for providers that stream both
                         message_index = 1 if reasoning_started else 0
                         if not message_started:
                             message_started = True
@@ -612,10 +605,8 @@ def _live_stream_router_owned_responses(
 
                     tool_call_deltas = delta.get("tool_calls")
                     if isinstance(tool_call_deltas, list) and tool_call_deltas:
-                        if (message_started or message_parts) and not allow_mixed_stream:
-                            raise LLMRequestError(
-                                "Mixed streamed tool_calls with streamed text is unsupported.",
-                            )
+                        # Allow tool_calls after text for providers that stream both
+                        _message_emitted = message_started
                         for tool_call_delta in tool_call_deltas:
                             if not isinstance(tool_call_delta, dict):
                                 continue
@@ -661,13 +652,17 @@ def _live_stream_router_owned_responses(
                                 if isinstance(arguments_delta, str):
                                     state["arguments_parts"].append(arguments_delta)
 
+                            # Account for message item already occupying an output slot
+                            _base_index = 1 if reasoning_started else 0
+                            if _message_emitted:
+                                _base_index += 1
                             if (
                                 not state["added"]
                                 and state.get("name")
                                 and state.get("id")
                             ):
                                 state["output_index"] = (
-                                    (1 if reasoning_started else 0) + len(tool_order)
+                                    _base_index + len(tool_order)
                                 )
                                 added_item = _stream_tool_added_item(
                                     state["name"],
@@ -756,9 +751,10 @@ def _live_stream_router_owned_responses(
                     if not state["added"]:
                         if not state.get("name"):
                             state["name"] = "unknown_tool"
-                        state["output_index"] = (1 if reasoning_started else 0) + len(
-                            tool_order
-                        )
+                        _post_base = 1 if reasoning_started else 0
+                        if message_started:
+                            _post_base += 1
+                        state["output_index"] = _post_base + len(tool_order)
                         added_item = _stream_tool_added_item(
                             state["name"],
                             state["id"],

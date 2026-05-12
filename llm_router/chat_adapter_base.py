@@ -522,10 +522,6 @@ class ChatCompletionAdapterBase:
             output_items.append(item)
 
         if native_tool_calls:
-            output_items = [
-                item for item in output_items
-                if item.get("type") == "reasoning"
-            ]
             for tool_call in native_tool_calls:
                 call_id = tool_call.get("id", "")
                 self.record_tool_reasoning(call_id, reasoning_content)

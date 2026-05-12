@@ -1087,6 +1087,8 @@ def test_responses_stream_mixed_text_and_tool_fails_by_default(
     body = response.get_data(as_text=True)
 
     assert response.status_code == 200
-    assert '"type": "response.failed"' in body
-    assert "Mixed streamed tool_calls with streamed text is unsupported" in body
-    assert server_mod._sessions.stats()["session_count"] == 0
+    assert '"type": "response.failed"' not in body
+    assert '"type": "response.output_text.delta"' in body
+    assert '"type": "response.function_call_arguments.delta"' in body
+    # Mixed stream now succeeds by default; session is created normally
+    assert server_mod._sessions.stats()["session_count"] >= 1
