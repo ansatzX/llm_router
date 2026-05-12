@@ -144,6 +144,21 @@ class DeepSeekChatAdapter:
         except TypeError:
             return str(output)
 
+    def response_item_tool_arguments_to_chat(self, msg: dict[str, Any]) -> str:
+        """Convert stored Responses tool calls back to Chat function arguments."""
+        if msg.get("type") == "custom_tool_call":
+            return json.dumps(
+                {"input": str(msg.get("input", ""))},
+                ensure_ascii=False,
+            )
+        arguments = msg.get("arguments", "")
+        if isinstance(arguments, str):
+            return arguments
+        try:
+            return json.dumps(arguments, ensure_ascii=False)
+        except TypeError:
+            return str(arguments)
+
     def response_item_to_chat(
         self,
         msg: dict[str, Any],
@@ -163,7 +178,7 @@ class DeepSeekChatAdapter:
             ):
                 name = self.namespaced_chat_tool_name(namespace, str(name))
             call_id = msg.get("call_id") or msg.get("id") or "unknown_call"
-            arguments = msg.get("arguments", msg.get("input", ""))
+            arguments = self.response_item_tool_arguments_to_chat(msg)
             converted = {
                 "role": "assistant",
                 "content": None,

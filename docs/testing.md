@@ -8,6 +8,7 @@ The test suite protects real router behavior:
 - pending tool-call validation
 - provider payload filtering
 - DeepSeek reasoning replay state
+- Xiaomi thinking, image, web-search, and reasoning replay behavior
 - MiroThinker MCP parsing and retry behavior
 - model routing and upstream model rewrites
 - Plan-mode compatibility recovery
@@ -31,11 +32,14 @@ Avoid tests that only lock in incidental helper structure.
 - `tests/responses/validation_and_tools.py`: tool-output validation,
   unsupported tool handling, streaming SSE shape, and MCP-first routing.
 - `tests/test_deepseek_adapter.py`: DeepSeek request/response adapter behavior.
+- `tests/test_xiaomi_adapter.py`: Xiaomi request/response adapter behavior.
+- `tests/test_model_catalog.py`: static model catalog regressions.
 - `tests/test_mirothinker_adapter.py`: MiroThinker MCP-first behavior.
 - `tests/test_config.py`: routing and upstream model rewrite behavior.
 - `tests/test_session_store.py`: persisted session behavior.
 - `tests/test_thread_safety.py`: initialization and threading assumptions.
 - `tests/live/test_codex_cli_e2e.py`: opt-in real Codex CLI smoke test.
+- `tests/live/test_xiaomi_api.py`: opt-in live Xiaomi provider smoke tests.
 
 Parser tests remain useful for the MiroThinker MCP path, but provider or
 Responses bugs should usually be tested at adapter or server level.
@@ -65,6 +69,16 @@ LLM_ROUTER_LIVE_CODEX_E2E=1 uv run python -m pytest tests/live -q
 
 Live tests start a temporary router, call the real `codex` CLI, and consume
 upstream provider quota. They must stay opt-in.
+
+Run live Xiaomi provider smoke tests only when explicitly needed:
+
+```bash
+LLM_ROUTER_LIVE_XIAOMI=1 MIMO_API_KEY=... uv run python -m pytest tests/live/test_xiaomi_api.py -q
+```
+
+Set `MIMO_BASE_URL` to test a Token Plan cluster and `MIMO_LIVE_MODEL` to test a
+specific MiMo deployment. These tests call Xiaomi directly and consume provider
+quota.
 
 ## Test Expectations For Provider Work
 

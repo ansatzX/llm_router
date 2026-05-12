@@ -67,8 +67,25 @@ Current DeepSeek-route behavior filters hosted tools such as `web_search`
 before provider calls. The router does not implement hosted-tool execution
 semantics, so this behaves like an empty/no-op hosted-tool surface for DeepSeek.
 
+Current Xiaomi-route behavior forwards Xiaomi's provider-hosted `web_search`
+tool and reconstructs a completed Responses `web_search_call` item when Xiaomi
+returns search annotations. This proves Codex can observe that hosted search
+occurred, but it is not a full citation UI contract. Xiaomi `web_search` turns
+currently use the non-streaming upstream path even when the client asks for
+SSE, so the router can reconstruct the final hosted-tool lifecycle reliably.
+
 Future work should define unsupported behavior first, then add provider support
 only when the execution and output lifecycle are clear.
+
+TODO:
+
+- model richer source/citation display if Codex adds a stable Responses
+  annotation shape for `output_text`
+- add live replay fixtures for Xiaomi stream first-packet search-source behavior
+- translate Xiaomi streamed search-source chunks before enabling live upstream
+  streaming for Xiaomi `web_search`
+- decide whether provider-hosted search should expose query/action details when
+  the upstream returns only source annotations
 
 ## Priority 4: Session Concurrency
 

@@ -820,3 +820,115 @@ def test_responses_non_deepseek_route_does_not_receive_deepseek_reasoning_cache(
     assert response.status_code == 200
     payload = mock_make_request.call_args.args[0]
     assert all("reasoning_content" not in message for message in payload["messages"])
+
+
+def test_responses_xiaomi_persists_provider_reasoning_state(tmp_path, monkeypatch):
+    """Xiaomi thinking tool calls should persist provider-private reasoning."""
+    client, _ = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": "",
+                        "reasoning_content": "need tool",
+                        "tool_calls": [
+                            {
+                                "id": "call_xiaomi",
+                                "type": "function",
+                                "function": {
+                                    "name": "exec_command",
+                                    "arguments": '{"cmd":"ls"}',
+                                },
+                            },
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["xiaomi"] = UpstreamConfig(
+        base_url="https://api.xiaomimimo.com",
+    )
+    server_mod._config.default_upstream = "xiaomi"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "mimo-v2.5-pro",
+            "input": "list files",
+            "tools": [
+                {
+                    "type": "function",
+                    "name": "exec_command",
+                    "parameters": {"type": "object"},
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    session = next(iter(server_mod._sessions._store.values()))
+    assert session.provider_state["xiaomi"]["reasoning_by_call_id"] == {
+        "call_xiaomi": "need tool",
+    }
+
+
+def test_responses_xiaomi_replays_provider_reasoning_state(tmp_path, monkeypatch):
+    """Xiaomi tool replay should use Xiaomi provider_state, not DeepSeek state."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "done"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["xiaomi"] = UpstreamConfig(
+        base_url="https://token-plan-cn.xiaomimimo.com/v1",
+    )
+    server_mod._config.default_upstream = "xiaomi"
+
+    session = server_mod._sessions.create("mimo-v2.5-pro")
+    session.items = [
+        {
+            "type": "function_call",
+            "name": "exec_command",
+            "arguments": '{"cmd":"ls"}',
+            "call_id": "call_xiaomi",
+        },
+        {
+            "type": "function_call_output",
+            "call_id": "call_xiaomi",
+            "output": "README.md",
+        },
+    ]
+    session.provider_state = {
+        "xiaomi": {
+            "reasoning_by_call_id": {"call_xiaomi": "persisted xiaomi reasoning"},
+        },
+        "deepseek": {
+            "reasoning_by_call_id": {"call_xiaomi": "wrong provider reasoning"},
+        },
+    }
+    server_mod._sessions.save()
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "mimo-v2.5-pro",
+            "previous_response_id": session.response_id,
+            "input": "continue",
+        },
+    )
+
+    assert response.status_code == 200
+    messages = mock_make_request.call_args.args[0]["messages"]
+    assert messages[0]["reasoning_content"] == "persisted xiaomi reasoning"

@@ -4,6 +4,7 @@
 providers. The project is currently centered on these route families:
 
 - DeepSeek official API through its Chat-compatible API surface.
+- Xiaomi MiMo official API through its Chat-compatible API surface.
 - Explicit third-party Responses passthrough routes for providers that expose
   their own `/v1/responses` state machine.
 - MiroThinker models that prefer MCP/XML tool calls.
@@ -18,6 +19,7 @@ The default route config is in [`router.toml`](router.toml).
 | Model pattern | Type | Upstream | Notes |
 | --- | --- | --- | --- |
 | `deepseek-*` | `responses_chat` | `deepseek` | Main supported route. Router keeps Responses state and adapts to upstream Chat `function` tools. |
+| `mimo-*` | `responses_chat` | `xiaomi` | Xiaomi MiMo official Chat API route. Router keeps Responses state, preserves `developer`, and adapts thinking/tool replay. |
 | `mirothinker-*` | `mcp_first` | `mirothinker` | MCP-first route. Native tools are converted to an MCP XML prompt. |
 
 Third-party providers that expose a compatible native `/v1/responses` endpoint
@@ -114,9 +116,17 @@ Set the upstream keys used by `router.toml`:
 
 ```bash
 export DEEPSEEK_API_KEY="sk-..."
+export MIMO_API_KEY="sk-..."
 # Optional, only if you enable a responses_passthrough gateway route:
 export DEEPSEEK_GATEWAY_API_KEY="sk-..."
 ```
+
+Xiaomi MiMo supports both the ordinary official Chat API and Token Plan
+clusters. The default `mimo-*` route uses one `xiaomi` upstream pointed at the
+China Token Plan base URL: `https://token-plan-cn.xiaomimimo.com/v1`. Other
+official base URLs are kept as comments in [`router.toml`](router.toml) so the
+single `xiaomi` upstream can be edited directly when a different cluster should
+own MiMo traffic.
 
 The repo includes these Codex helper files:
 
@@ -141,6 +151,7 @@ The intended Codex usage is:
 | Command | Provider | Model catalog | Default model |
 | --- | --- | --- | --- |
 | `codex -p llm_router` | Local `llm_router` provider | `~/.codex/llm_router.json` | `deepseek-v4-pro` |
+| `codex -p mimo` | Local `llm_router` provider | `~/.codex/llm_router.json` | `mimo-v2.5-pro` |
 
 `env_key` in the Codex example is only a Codex-side placeholder for now. Real
 upstream keys are read by `llm-router` according to [`router.toml`](router.toml),
@@ -186,6 +197,71 @@ The adapter currently handles:
   tool call and its tool output.
 - DeepSeek-specific payload filtering so Responses metadata such as
   `client_metadata` is not sent to DeepSeek.
+
+## Xiaomi Adapter
+
+Xiaomi MiMo support lives in `llm_router.xiaomi`.
+
+The adapter currently handles:
+
+- Xiaomi official Chat request filtering for documented text, tool, and
+  thinking parameters.
+- Mapping Codex `reasoning` / `reasoning_effort` to Xiaomi
+  `thinking.type`, while preserving explicit `thinking` when provided.
+- Preserving `developer` messages because Xiaomi documents that role directly.
+- Xiaomi image input by converting Responses `input_image` content items to
+  Chat `image_url` parts.
+- Structured image content in tool outputs for Xiaomi multimodal follow-up
+  turns.
+- Codex `function`, `namespace`, and `custom` tools as Chat `function` tools.
+- Xiaomi native `web_search` tools for live search requests, including a
+  Codex-visible completed `web_search_call` item when Xiaomi returns search
+  annotations.
+- Xiaomi `reasoning_content` conversion into Codex Responses reasoning items.
+- Xiaomi thinking/tool replay state under `provider_state["xiaomi"]`, isolated
+  from DeepSeek provider state.
+- Xiaomi web-search `annotations` on final text responses for clients that keep
+  provider citation metadata.
+
+The adapter targets Codex text, image, tool, and web-search workflows. Xiaomi
+TTS/audio and video understanding are not implemented as Codex-facing semantics
+yet.
+
+Xiaomi `web_search` turns currently use the non-streaming upstream path even
+when Codex requests SSE. The router still returns Responses SSE to Codex, but
+upstream live search-source chunks are left as future work until their event
+shape is translated explicitly.
+
+The static catalog includes `mimo-v2.5-pro`, `mimo-v2.5`, `mimo-v2-pro`,
+`mimo-v2-omni`, and `mimo-v2-flash`. Image input is enabled only for the MiMo
+models with documented or maintainer-confirmed image support.
+
+Current Xiaomi regressions cover the meaningful provider boundary rather than
+only helper shape:
+
+- adapter conversion in [`tests/test_xiaomi_adapter.py`](tests/test_xiaomi_adapter.py)
+  for request filtering, `thinking` mapping, `developer` role preservation,
+  image parts, structured tool-output images, web search, annotations, and
+  reasoning replay.
+- `/v1/responses` behavior in
+  [`tests/responses/validation_and_tools.py`](tests/responses/validation_and_tools.py)
+  for multimodal request forwarding, native Xiaomi `web_search`, Codex-visible
+  `web_search_call`, `thinking` mapping, and the conservative non-streaming
+  upstream path for Xiaomi `web_search` turns.
+- provider sidecar persistence in
+  [`tests/responses/state_and_deepseek.py`](tests/responses/state_and_deepseek.py)
+  to keep Xiaomi `reasoning_content` replay isolated from DeepSeek state.
+- catalog and route regressions in [`tests/test_model_catalog.py`](tests/test_model_catalog.py)
+  and [`tests/test_config.py`](tests/test_config.py).
+
+Live Xiaomi smoke tests are opt-in because they consume provider quota:
+
+```bash
+LLM_ROUTER_LIVE_XIAOMI=1 MIMO_API_KEY=... uv run python -m pytest tests/live/test_xiaomi_api.py -q
+```
+
+Use `MIMO_BASE_URL` to point the live smoke tests at a Token Plan cluster, and
+`MIMO_LIVE_MODEL` to test a specific MiMo model.
 
 ## MiroThinker Adapter
 
@@ -278,6 +354,12 @@ Run the focused Responses suite:
 
 ```bash
 uv run python -m pytest tests/test_server_responses.py -q
+```
+
+Run focused Xiaomi regressions:
+
+```bash
+uv run python -m pytest tests/test_xiaomi_adapter.py tests/test_model_catalog.py tests/responses/validation_and_tools.py::test_responses_xiaomi_forwards_multimodal_input_and_web_search_tool tests/responses/validation_and_tools.py::test_responses_xiaomi_maps_none_reasoning_to_disabled_thinking tests/responses/validation_and_tools.py::test_responses_xiaomi_stream_adds_web_search_call_item_before_done tests/responses/state_and_deepseek.py::test_responses_xiaomi_persists_provider_reasoning_state tests/responses/state_and_deepseek.py::test_responses_xiaomi_replays_provider_reasoning_state -q
 ```
 
 Run lint:

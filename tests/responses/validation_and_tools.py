@@ -171,6 +171,212 @@ def test_responses_deepseek_filters_hosted_web_search_tool_before_upstream(
     payload = mock_make_request.call_args.args[0]
     assert "tools" not in payload
 
+def test_responses_xiaomi_forwards_multimodal_input_and_web_search_tool(
+    tmp_path,
+    monkeypatch,
+):
+    """Xiaomi supports image content parts and its native web_search tool."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": "found it",
+                        "annotations": [
+                            {
+                                "type": "url_citation",
+                                "url": "https://example.com/weather",
+                                "title": "Weather",
+                            },
+                        ],
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["xiaomi"] = UpstreamConfig(
+        base_url="https://api.xiaomimimo.com",
+    )
+    server_mod._config.default_upstream = "xiaomi"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "mimo-v2.5-pro",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "describe this"},
+                        {
+                            "type": "input_image",
+                            "image_url": "data:image/png;base64,abc",
+                        },
+                    ],
+                }
+            ],
+            "tools": [
+                {
+                    "type": "web_search",
+                    "external_web_access": True,
+                    "force_search": True,
+                    "max_keyword": 3,
+                    "limit": 1,
+                    "user_location": {
+                        "type": "approximate",
+                        "country": "China",
+                        "region": "Hubei",
+                        "city": "Wuhan",
+                    },
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = mock_make_request.call_args.args[0]
+    assert payload["messages"] == [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "describe this"},
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,abc"},
+                },
+            ],
+        }
+    ]
+    assert payload["tools"] == [
+        {
+            "type": "web_search",
+            "force_search": True,
+            "max_keyword": 3,
+            "limit": 1,
+            "user_location": {
+                "type": "approximate",
+                "country": "China",
+                "region": "Hubei",
+                "city": "Wuhan",
+            },
+        }
+    ]
+    body = response.get_json()
+    assert body["output"][0] == {
+        "type": "web_search_call",
+        "status": "completed",
+    }
+    assert body["output"][1]["content"][0]["annotations"][0]["url"] == (
+        "https://example.com/weather"
+    )
+
+def test_responses_xiaomi_maps_none_reasoning_to_disabled_thinking(
+    tmp_path,
+    monkeypatch,
+):
+    """Codex reasoning effort must control Xiaomi's documented thinking knob."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["xiaomi"] = UpstreamConfig(
+        base_url="https://api.xiaomimimo.com",
+    )
+    server_mod._config.default_upstream = "xiaomi"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "mimo-v2.5-pro",
+            "input": "hi",
+            "reasoning": {"effort": "none"},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = mock_make_request.call_args.args[0]
+    assert payload["thinking"] == {"type": "disabled"}
+    assert "reasoning" not in payload
+    assert "reasoning_effort" not in payload
+
+def test_responses_xiaomi_stream_adds_web_search_call_item_before_done(
+    tmp_path,
+    monkeypatch,
+):
+    """Simulated SSE must preserve the hosted web-search item lifecycle."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": "found it",
+                        "annotations": [
+                            {
+                                "type": "url_citation",
+                                "url": "https://example.com/weather",
+                                "title": "Weather",
+                            },
+                        ],
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    monkeypatch.setattr(
+        server_mod,
+        "make_llm_stream_request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("Xiaomi web_search should not use live upstream streaming"),
+        ),
+    )
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["xiaomi"] = UpstreamConfig(
+        base_url="https://api.xiaomimimo.com",
+    )
+    server_mod._config.default_upstream = "xiaomi"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "mimo-v2.5-pro",
+            "input": "search",
+            "stream": True,
+            "tools": [{"type": "web_search", "force_search": True}],
+        },
+    )
+
+    assert response.status_code == 200
+    mock_make_request.assert_called_once()
+    body = response.data.decode("utf-8")
+    added = _sse_payloads(body, "response.output_item.added")
+    done = _sse_payloads(body, "response.output_item.done")
+    assert added[0]["item"] == {
+        "type": "web_search_call",
+        "status": "completed",
+    }
+    assert done[0]["item"] == {
+        "type": "web_search_call",
+        "status": "completed",
+    }
+
 def test_responses_generic_chat_does_not_apply_deepseek_unsupported_feature_policy(
     tmp_path,
     monkeypatch,

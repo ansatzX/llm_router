@@ -15,6 +15,14 @@ api_key_env = "AIHUBMIX_API_KEY"
 base_url = "https://api.deepseek.com"
 api_key_env = "DEEPSEEK_API_KEY"
 
+[upstream.xiaomi]
+base_url = "https://token-plan-cn.xiaomimimo.com/v1"
+api_key_env = "MIMO_API_KEY"
+# Other official Xiaomi MiMo base URLs:
+# - Normal Chat API: https://api.xiaomimimo.com
+# - Token Plan Singapore: https://token-plan-sgp.xiaomimimo.com/v1
+# - Token Plan Europe: https://token-plan-ams.xiaomimimo.com/v1
+
 # Optional example. Enable only when the gateway exposes a compatible native
 # /v1/responses endpoint and owns response state.
 #
@@ -61,6 +69,11 @@ upstream = "mirothinker"
 pattern = "deepseek-*"
 type = "responses_chat"
 upstream = "deepseek"
+
+[[routes]]
+pattern = "mimo-*"
+type = "responses_chat"
+upstream = "xiaomi"
 
 [[routes]]
 pattern = "gpt-*"

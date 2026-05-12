@@ -1,5 +1,7 @@
 """Tests for DeepSeek provider-specific Chat adapter."""
 
+import json
+
 from llm_router.deepseek import DeepSeekChatAdapter
 
 
@@ -305,6 +307,23 @@ def test_deepseek_restores_chat_response_tool_calls_to_responses_items():
         },
     ]
     assert adapter.reasoning_by_call_id["call_patch"] == "edit the file"
+
+
+def test_deepseek_replays_custom_tool_calls_with_json_arguments():
+    adapter = DeepSeekChatAdapter()
+
+    messages = adapter.flatten_response_items([
+        {
+            "type": "custom_tool_call",
+            "id": "call_patch",
+            "call_id": "call_patch",
+            "name": "apply_patch",
+            "input": "--- a/file\n+++ b/file\n",
+        },
+    ])
+
+    arguments = messages[0]["tool_calls"][0]["function"]["arguments"]
+    assert json.loads(arguments) == {"input": "--- a/file\n+++ b/file\n"}
 
 
 def test_deepseek_restores_plain_chat_response_with_inline_reasoning_only():

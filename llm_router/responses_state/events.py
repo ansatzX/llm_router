@@ -23,9 +23,13 @@ def iter_sse_events(
         if item.get("type") == "message":
             added_item = dict(item)
             added_item["content"] = [
-                {key: value for key, value in content.items() if key != "text"}
+                {
+                    **{key: value for key, value in content.items() if key != "text"},
+                    "text": "",
+                }
                 for content in item.get("content", [])
                 if isinstance(content, dict)
+                and content.get("type") == "output_text"
             ]
             added_event = {
                 "type": "response.output_item.added",
@@ -50,12 +54,21 @@ def iter_sse_events(
             added_item = {
                 "type": "reasoning",
                 "summary": [
-                    {key: value for key, value in part.items() if key != "text"}
+                    {
+                        "type": part.get("type", "summary_text"),
+                        # Codex deserializes reasoning items before applying
+                        # deltas, and its summary/text variants require a
+                        # text field even for an empty streamed placeholder.
+                        "text": "",
+                    }
                     for part in summary_parts
                     if isinstance(part, dict)
                 ],
                 "content": [
-                    {key: value for key, value in part.items() if key != "text"}
+                    {
+                        "type": part.get("type", "reasoning_text"),
+                        "text": "",
+                    }
                     for part in content_parts
                     if isinstance(part, dict)
                 ],
@@ -145,6 +158,13 @@ def iter_sse_events(
                     f"event: {event_name}\n"
                     f"data: {json.dumps(function_event)}\n\n"
                 )
+        elif item.get("type") == "web_search_call":
+            added_event = {
+                "type": "response.output_item.added",
+                "output_index": idx,
+                "item": item,
+            }
+            yield f"event: response.output_item.added\ndata: {json.dumps(added_event)}\n\n"
 
         item_event = {
             "type": "response.output_item.done",

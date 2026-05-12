@@ -57,6 +57,7 @@ from llm_router.responses_state.tools import (
 )
 from llm_router.responses_state.usage import _responses_usage_from_provider
 from llm_router.session_store import SessionStore
+from llm_router.xiaomi import XiaomiChatAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -89,6 +90,7 @@ class _ResponsesTurnContext:
     api_key: str
     upstream_model: str
     is_deepseek: bool
+    provider_state_key: str | None
     chat_adapter: DeepSeekChatAdapter
     tool_type_map: dict[str, str]
     inject_mcp: bool
@@ -203,6 +205,18 @@ def _is_deepseek_upstream(upstream_name: str, base_url: str) -> bool:
     return upstream_name == "deepseek" or "api.deepseek.com" in base_url
 
 
+def _is_xiaomi_upstream(upstream_name: str, base_url: str) -> bool:
+    if upstream_name == "xiaomi":
+        return True
+    host = urlparse(base_url.rstrip("/")).netloc.lower()
+    return host in {
+        "api.xiaomimimo.com",
+        "token-plan-cn.xiaomimimo.com",
+        "token-plan-sgp.xiaomimimo.com",
+        "token-plan-ams.xiaomimimo.com",
+    }
+
+
 def _is_official_deepseek_base_url(base_url: str) -> bool:
     return urlparse(base_url.rstrip("/")).netloc.lower() == "api.deepseek.com"
 
@@ -210,6 +224,8 @@ def _is_official_deepseek_base_url(base_url: str) -> bool:
 def _chat_adapter_for(upstream_name: str, base_url: str) -> DeepSeekChatAdapter:
     if _is_deepseek_upstream(upstream_name, base_url):
         return DeepSeekChatAdapter()
+    if _is_xiaomi_upstream(upstream_name, base_url):
+        return XiaomiChatAdapter()
     return OpenAIChatAdapter()
 
 
@@ -236,7 +252,7 @@ def _tool_call_ids_from_response_items(items: list[dict[str, Any]]) -> set[str]:
     return call_ids
 
 
-def _merge_deepseek_provider_states(
+def _merge_reasoning_provider_states(
     *states: dict[str, Any] | None,
 ) -> dict[str, dict[str, str]]:
     merged: dict[str, str] = {}
@@ -300,7 +316,11 @@ def _supports_live_upstream_streaming(
     """
     if context.inject_mcp:
         return False
-    if tools_raw and not context.is_deepseek:
+    if context.provider_state_key == "xiaomi" and any(
+        tool.get("type") == "web_search" for tool in tools_raw
+    ):
+        return False
+    if tools_raw and context.provider_state_key not in {"deepseek", "xiaomi"}:
         return False
     return context.collaboration_mode != "Plan"
 
@@ -491,8 +511,12 @@ def _live_stream_router_owned_responses(
                                     "item": {
                                         "type": "reasoning",
                                         "id": reasoning_item_id,
-                                        "summary": [{"type": "summary_text"}],
-                                        "content": [{"type": "reasoning_text"}],
+                                        "summary": [
+                                            {"type": "summary_text", "text": ""},
+                                        ],
+                                        "content": [
+                                            {"type": "reasoning_text", "text": ""},
+                                        ],
                                     },
                                 },
                             )
@@ -549,7 +573,7 @@ def _live_stream_router_owned_responses(
                                         "type": "message",
                                         "id": message_item_id,
                                         "role": "assistant",
-                                        "content": [{"type": "output_text"}],
+                                        "content": [{"type": "output_text", "text": ""}],
                                     },
                                 },
                             )
@@ -952,20 +976,21 @@ def _handle_responses_passthrough(
     return jsonify(response), 200
 
 
-def _load_deepseek_provider_state(
+def _load_reasoning_provider_state(
     turn: ResponsesTurn,
     chat_adapter: DeepSeekChatAdapter,
+    provider_state_key: str,
 ) -> None:
     call_ids = _tool_call_ids_from_response_items(
         [*turn.session.items, *turn.input_items],
     )
     recovered_provider_state = _sessions.provider_state_for_call_ids(
-        "deepseek",
+        provider_state_key,
         call_ids,
     )
-    session_provider_state = turn.session.provider_state.get("deepseek")
+    session_provider_state = turn.session.provider_state.get(provider_state_key)
     chat_adapter.load_provider_state(
-        _merge_deepseek_provider_states(
+        _merge_reasoning_provider_states(
             recovered_provider_state,
             session_provider_state,
         ),
@@ -979,7 +1004,8 @@ def _load_deepseek_provider_state(
         )
     )
     if recovered_call_ids:
-        log_debug("DEEPSEEK_PROVIDER_STATE_RECOVERY", {
+        log_debug("REASONING_PROVIDER_STATE_RECOVERY", {
+            "provider": provider_state_key,
             "recovered_call_ids": recovered_call_ids,
             "session_had_provider_state": bool(session_provider_state),
         })
@@ -1001,11 +1027,15 @@ def _prepare_router_owned_responses_context(
         messages,
     )
     is_deepseek = _is_deepseek_upstream(upstream_name, base_url)
+    is_xiaomi = _is_xiaomi_upstream(upstream_name, base_url)
+    provider_state_key = (
+        "deepseek" if is_deepseek else "xiaomi" if is_xiaomi else None
+    )
     chat_adapter = _chat_adapter_for(upstream_name, base_url)
     tool_type_map = chat_adapter.tool_type_map(tools_raw)
     inject_mcp = (model_type == "mcp_first")
-    if is_deepseek:
-        _load_deepseek_provider_state(turn, chat_adapter)
+    if provider_state_key:
+        _load_reasoning_provider_state(turn, chat_adapter, provider_state_key)
 
     messages = turn.to_chat_messages(chat_adapter.flatten_response_items)
     if instructions:
@@ -1030,6 +1060,7 @@ def _prepare_router_owned_responses_context(
         api_key=api_key,
         upstream_model=upstream_model,
         is_deepseek=is_deepseek,
+        provider_state_key=provider_state_key,
         chat_adapter=chat_adapter,
         tool_type_map=tool_type_map,
         inject_mcp=inject_mcp,
@@ -1054,7 +1085,7 @@ def _build_responses_chat_payload(
     if tools_raw and not context.inject_mcp:
         chat_tools = (
             context.chat_adapter.responses_tools_to_chat(tools_raw)
-            if context.is_deepseek
+            if context.provider_state_key in {"deepseek", "xiaomi"}
             else [convert_responses_tool_to_chat(t) for t in tools_raw]
         )
         if chat_tools:
@@ -1167,8 +1198,8 @@ def _commit_and_build_responses_body(
     has_tool_output = bool(result.tool_calls_list)
     output_text = None if has_tool_output else result.output_text
     provider_state_updates = (
-        {"deepseek": context.chat_adapter.dump_provider_state()}
-        if context.is_deepseek
+        {context.provider_state_key: context.chat_adapter.dump_provider_state()}
+        if context.provider_state_key
         else None
     )
     log_debug(

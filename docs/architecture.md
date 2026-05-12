@@ -15,8 +15,9 @@ Its current job is:
 - adapt provider responses back into Codex-compatible Responses output
 - expose enough SSE shape for current Codex streaming usage
 
-The main target today is Codex with DeepSeek official Chat API, explicit
-third-party Responses passthrough routes, and MiroThinker MCP-first behavior.
+The main target today is Codex with DeepSeek official Chat API, Xiaomi MiMo
+official Chat API, explicit third-party Responses passthrough routes, and
+MiroThinker MCP-first behavior.
 
 ## Main Modules
 
@@ -30,6 +31,7 @@ third-party Responses passthrough routes, and MiroThinker MCP-first behavior.
   construction, Responses tool normalization, and usage normalization.
 - `llm_router/session_store.py`: JSON-backed persistent session storage.
 - `llm_router/deepseek/`: DeepSeek official Chat adapter.
+- `llm_router/xiaomi/`: Xiaomi MiMo official Chat adapter.
 - `llm_router/mirothinker/`: MiroThinker MCP-first adapter.
 - `llm_router/openai_chat.py`: generic OpenAI-compatible Chat adapter.
 - `llm_router/llm_client.py`: transport wrapper around the OpenAI Python SDK.
@@ -83,7 +85,7 @@ The Responses state machine owns:
 
 Provider adapters do not own global conversation state. They may own
 provider-private sidecars that are stored on the session, such as DeepSeek
-reasoning replay data.
+or Xiaomi reasoning replay data.
 
 ## Persistence
 
@@ -152,6 +154,37 @@ Current MiroThinker behavior:
 - incomplete MCP XML can trigger rollback retry
 - upstream streaming is forced off for this route
 
+### Xiaomi MiMo
+
+Xiaomi MiMo uses a `responses_chat` route with provider-specific filtering and
+reconstruction over the upstream Chat API. The default route uses the single
+`xiaomi` upstream, pointed at the China Token Plan base URL
+`https://token-plan-cn.xiaomimimo.com/v1`; other official Xiaomi base URLs are
+kept as comments in `router.toml`.
+
+Current Xiaomi behavior:
+
+- preserves documented `developer` messages
+- maps Codex `reasoning` / `reasoning_effort` to Xiaomi `thinking.type`
+- preserves explicit provider-native `thinking` when supplied
+- converts Responses `input_image` items to Chat `image_url` content parts
+- preserves structured image content in tool outputs for multimodal follow-up
+  turns
+- converts Codex `function`, `namespace`, and `custom` tools to Chat
+  `function` tools
+- forwards Xiaomi-native `web_search` tools using Xiaomi's documented fields
+- restores Xiaomi `reasoning_content` as Codex reasoning output items
+- persists and replays Xiaomi thinking/tool sidecars under
+  `provider_state["xiaomi"]`
+- converts Xiaomi web-search annotations into a completed Codex
+  `web_search_call` item and keeps citation annotations on final text
+- falls back to non-streaming upstream calls for Xiaomi `web_search` requests
+  until Xiaomi's streamed search-source chunks are translated into Responses
+  SSE
+
+Audio, TTS, and video-specific Xiaomi semantics are not yet represented as
+Codex-facing Responses behavior.
+
 ### Generic OpenAI-Compatible Chat
 
 Generic Chat backends use allowlisted payload forwarding. Do not assume that
@@ -171,9 +204,11 @@ or persist provider-owned pending tool state locally.
 
 ## Streaming Today
 
-The router currently accepts `stream: true`, but provider payloads are forced to
-non-streaming internally. If Codex requested streaming, the router returns a
-simulated Responses SSE sequence:
+Router-owned `responses_chat` routes can translate upstream Chat SSE into
+Codex-compatible Responses SSE for supported text, reasoning, and accumulated
+tool-call turns. If live upstream streaming is not safe for a route or request,
+the router falls back to a simulated Responses SSE sequence built from the
+completed provider response:
 
 - `response.created`
 - `response.output_item.added`
@@ -181,8 +216,8 @@ simulated Responses SSE sequence:
 - `response.output_item.done`
 - `response.completed`
 
-This is enough for current item and tool-argument delivery. It is not full
-Responses SSE parity.
+This is enough for current item, reasoning, text, and tool-argument delivery.
+It is not full Responses SSE parity.
 
 ## Logging
 

@@ -127,6 +127,21 @@ If DeepSeek rejects a continuation because thinking-mode `reasoning_content` is
 missing, return a client-visible provider error and leave the session unchanged.
 Do not silently downgrade thinking mode or fabricate provider reasoning.
 
+For Xiaomi MiMo Chat routes, the same reasoning replay sidecar pattern is used
+under `provider_state["xiaomi"]`. Xiaomi documents `thinking.type`, not
+OpenAI/Codex `reasoning_effort`, so the Xiaomi adapter maps Codex
+`none`/`minimal` reasoning to `thinking.type = "disabled"` and other reasoning
+efforts to `thinking.type = "enabled"`. If a request explicitly contains
+`thinking`, the adapter preserves that provider-native value.
+
+Xiaomi also documents `developer` messages, `image_url` content parts, and a
+native `web_search` hosted tool. Preserve these in the Xiaomi adapter instead
+of applying DeepSeek's stricter downgrade/filtering rules. When Xiaomi returns
+web-search `annotations`, synthesize a completed Responses `web_search_call`
+item so Codex sees that a hosted search occurred, and keep the provider
+annotations on the final text item for clients that understand citation
+metadata.
+
 ## MiroThinker MCP-First
 
 Only MiroThinker is currently `mcp_first`.

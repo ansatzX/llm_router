@@ -13,6 +13,26 @@ def test_deepseek_models_route_as_responses_chat():
     assert upstream.base_url == "https://api.deepseek.com"
 
 
+def test_mimo_models_route_as_responses_chat():
+    """Xiaomi MiMo routes through stateful Responses with Chat upstream adapter."""
+    cfg = RouterConfig.from_toml("router.toml")
+
+    model_type, upstream = cfg.resolve("mimo-v2.5-pro")
+
+    assert model_type == "responses_chat"
+    assert upstream.base_url == "https://token-plan-cn.xiaomimimo.com/v1"
+
+
+def test_xiaomi_uses_single_default_token_plan_upstream():
+    """Default config keeps one Xiaomi upstream and points it at CN Token Plan."""
+    cfg = RouterConfig.from_toml("router.toml")
+
+    assert cfg.upstreams["xiaomi"].base_url == "https://token-plan-cn.xiaomimimo.com/v1"
+    assert "xiaomi_token_plan_cn" not in cfg.upstreams
+    assert "xiaomi_token_plan_sgp" not in cfg.upstreams
+    assert "xiaomi_token_plan_ams" not in cfg.upstreams
+
+
 def test_only_mirothinker_routes_through_mcp_parser():
     """MiroThinker is the only configured MCP-first provider."""
     cfg = RouterConfig.from_toml("router.toml")

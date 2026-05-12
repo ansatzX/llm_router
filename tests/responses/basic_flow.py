@@ -169,6 +169,14 @@ def test_responses_stream_emits_reasoning_deltas(tmp_path, monkeypatch):
     )
 
     assert response.status_code == 200
+    added = _sse_payloads(response.get_data(as_text=True), "response.output_item.added")
+    assert added[0]["item"] == {
+        "type": "reasoning",
+        "summary": [{"type": "summary_text", "text": ""}],
+        "content": [{"type": "reasoning_text", "text": ""}],
+    }
+    assert added[1]["item"]["type"] == "message"
+    assert added[1]["item"]["content"] == [{"type": "output_text", "text": ""}]
     assert b"response.reasoning_summary_part.added" in response.data
     assert b"response.reasoning_summary_text.delta" in response.data
     assert b"response.reasoning_text.delta" in response.data
@@ -270,6 +278,15 @@ def test_responses_stream_uses_real_upstream_streaming_for_text_and_reasoning(
     assert seen_stream_flag["called"] is True
     assert mock_make_request.call_count == 0
 
+    added = _sse_payloads(body, "response.output_item.added")
+    assert added[0]["item"] == {
+        "type": "reasoning",
+        "id": added[0]["item"]["id"],
+        "summary": [{"type": "summary_text", "text": ""}],
+        "content": [{"type": "reasoning_text", "text": ""}],
+    }
+    assert added[1]["item"]["type"] == "message"
+    assert added[1]["item"]["content"] == [{"type": "output_text", "text": ""}]
     assert '"type": "response.reasoning_summary_text.delta"' in body
     assert '"delta": "plan "' in body
     assert '"delta": "step"' in body
