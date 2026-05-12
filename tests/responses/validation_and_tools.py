@@ -475,6 +475,223 @@ def test_responses_xiaomi_do_web_search_failure_returns_null_tool_output(
     assert body["output"][0]["content"][0]["text"] == "final despite null"
 
 
+def test_responses_xiaomi_questions_model_after_five_searches_then_stops(
+    tmp_path,
+    monkeypatch,
+):
+    """After five searches, ask the model whether it really needs more search."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+
+    def tool_call_response(index: int) -> dict[str, object]:
+        return {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": f"call_search_{index}",
+                                "type": "function",
+                                "function": {
+                                    "name": "do_web_search",
+                                    "arguments": f'{{"query":"query {index}"}}',
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    def search_response(index: int) -> dict[str, object]:
+        return {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {"content": f"search result {index}"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    side_effects: list[dict[str, object]] = [tool_call_response(1)]
+    for index in range(1, 6):
+        side_effects.append(search_response(index))
+        side_effects.append(tool_call_response(index + 1))
+    side_effects.append({
+        "created": 123,
+        "choices": [
+            {
+                "message": {"content": "I should stop and answer now."},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    })
+    mock_make_request.side_effect = side_effects
+
+    events = []
+    monkeypatch.setattr(server_mod, "log_debug", lambda event, data: events.append((event, data)))
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["xiaomi"] = UpstreamConfig(
+        base_url="https://api.xiaomimimo.com",
+    )
+    server_mod._config.default_upstream = "xiaomi"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "mimo-v2.5-pro",
+            "input": "持续搜索直到有结论",
+            "tools": [{"type": "web_search", "external_web_access": True}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert mock_make_request.call_count == 12
+    question_payload = mock_make_request.call_args_list[11].args[0]
+    assert question_payload["messages"][-1] == {
+        "role": "tool",
+        "tool_call_id": "call_search_6",
+        "content": json.dumps(
+            "已经多次搜索了，是否继续？如果确实必须继续搜索，请再次调用 do_web_search；"
+            "否则请基于已有搜索结果回答用户。",
+            ensure_ascii=False,
+        ),
+    }
+    body = response.get_json()
+    assert [item["type"] for item in body["output"]] == ["reasoning", "message"]
+    assert body["output"][0]["summary"] == [
+        {"type": "summary_text", "text": "正在多次搜索，提醒用户"}
+    ]
+    assert body["output"][0]["content"] == []
+    assert body["output"][1]["content"][0]["text"] == "I should stop and answer now."
+    assert any(
+        event == "XIAOMI_INTERNAL_TOOL_LOOP_STOPPED"
+        and data["reason"] == "questioned_model_after_max_search_rounds"
+        and data["max_rounds"] == 5
+        for event, data in events
+    )
+
+
+def test_responses_xiaomi_continues_when_model_insists_after_search_question(
+    tmp_path,
+    monkeypatch,
+):
+    """If the model asks again after the question, router resumes searching."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+
+    def tool_call_response(index: int) -> dict[str, object]:
+        return {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": f"call_search_{index}",
+                                "type": "function",
+                                "function": {
+                                    "name": "do_web_search",
+                                    "arguments": f'{{"query":"query {index}"}}',
+                                },
+                            }
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    def search_response(index: int) -> dict[str, object]:
+        return {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {"content": f"search result {index}"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+
+    side_effects: list[dict[str, object]] = [tool_call_response(1)]
+    for index in range(1, 6):
+        side_effects.append(search_response(index))
+        side_effects.append(tool_call_response(index + 1))
+    side_effects.extend([
+        tool_call_response(7),
+        search_response(7),
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {"content": "final after insisted search"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    ])
+    mock_make_request.side_effect = side_effects
+
+    events = []
+    monkeypatch.setattr(server_mod, "log_debug", lambda event, data: events.append((event, data)))
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["xiaomi"] = UpstreamConfig(
+        base_url="https://api.xiaomimimo.com",
+    )
+    server_mod._config.default_upstream = "xiaomi"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "mimo-v2.5-pro",
+            "input": "持续搜索直到有结论",
+            "tools": [{"type": "web_search", "external_web_access": True}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert mock_make_request.call_count == 14
+    search_payload = mock_make_request.call_args_list[12].args[0]
+    assert search_payload["messages"] == [{"role": "user", "content": "query 7"}]
+    body = response.get_json()
+    assert [item["type"] for item in body["output"]] == ["reasoning", "message"]
+    assert body["output"][0]["summary"] == [
+        {"type": "summary_text", "text": "正在多次搜索，提醒用户"}
+    ]
+    assert body["output"][1]["content"][0]["text"] == "final after insisted search"
+    assert any(
+        event == "XIAOMI_INTERNAL_WEB_SEARCH_TOOL_CALLS"
+        and data["round"] == 1
+        and data["queries"] == ["query 7"]
+        for event, data in events
+    )
+
+
 def test_responses_xiaomi_builtin_web_search_keeps_function_tools_on_main_request(
     tmp_path,
     monkeypatch,

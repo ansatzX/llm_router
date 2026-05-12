@@ -120,7 +120,12 @@ class _BuiltinWebSearchResult:
 
 _XIAOMI_DO_WEB_SEARCH_TOOL_NAME = "do_web_search"
 _XIAOMI_BUILTIN_WEB_SEARCH_MODEL = "mimo-v2-omni"
-_XIAOMI_BUILTIN_TOOL_MAX_ROUNDS = 2
+_XIAOMI_BUILTIN_TOOL_MAX_ROUNDS = 5
+_XIAOMI_BUILTIN_TOOL_LIMIT_MESSAGE = (
+    "已经多次搜索了，是否继续？如果确实必须继续搜索，请再次调用 do_web_search；"
+    "否则请基于已有搜索结果回答用户。"
+)
+_XIAOMI_BUILTIN_TOOL_LIMIT_SUMMARY = "正在多次搜索，提醒用户"
 
 
 def create_app(config_path: str | None = None) -> Flask:
@@ -1402,6 +1407,32 @@ def _append_internal_tool_exchange(
         })
 
 
+def _prepend_xiaomi_search_reasoning_summary(
+    result: _ResponsesProviderResult,
+) -> None:
+    if any(
+        item.get("type") == "reasoning"
+        and item.get("summary") == [
+            {
+                "type": "summary_text",
+                "text": _XIAOMI_BUILTIN_TOOL_LIMIT_SUMMARY,
+            }
+        ]
+        for item in result.output_items
+    ):
+        return
+    result.output_items.insert(0, {
+        "type": "reasoning",
+        "summary": [
+            {
+                "type": "summary_text",
+                "text": _XIAOMI_BUILTIN_TOOL_LIMIT_SUMMARY,
+            },
+        ],
+        "content": [],
+    })
+
+
 def _run_xiaomi_internal_tool_loop(
     data: dict[str, Any],
     context: _ResponsesTurnContext,
@@ -1411,12 +1442,41 @@ def _run_xiaomi_internal_tool_loop(
 ) -> _ResponsesProviderResult:
     result = first_result
     total_tool_usage = _responses_usage_from_provider({})
-    for round_index in range(_XIAOMI_BUILTIN_TOOL_MAX_ROUNDS):
+    search_rounds_since_question = 0
+    questioned_after_many_searches = False
+    while True:
         calls = _find_do_web_search_calls(result.response_message.get("tool_calls") or [])
         if not calls:
             break
+        if search_rounds_since_question >= _XIAOMI_BUILTIN_TOOL_MAX_ROUNDS:
+            questioned_after_many_searches = True
+            log_debug("XIAOMI_INTERNAL_TOOL_LOOP_STOPPED", {
+                "reason": "questioned_model_after_max_search_rounds",
+                "max_rounds": _XIAOMI_BUILTIN_TOOL_MAX_ROUNDS,
+                "queries": [call["query"][:240] for call in calls],
+            })
+            _append_internal_tool_exchange(
+                payload,
+                result.response_message,
+                [
+                    {
+                        "call_id": call["id"],
+                        "output": _XIAOMI_BUILTIN_TOOL_LIMIT_MESSAGE,
+                    }
+                    for call in calls
+                ],
+            )
+            result = _responses_provider_result_from_llm(
+                context,
+                make_llm_request(payload, context.base_url, context.api_key),
+                None,
+                result.retry_count,
+            )
+            search_rounds_since_question = 0
+            continue
+
         log_debug("XIAOMI_INTERNAL_WEB_SEARCH_TOOL_CALLS", {
-            "round": round_index + 1,
+            "round": search_rounds_since_question + 1,
             "call_count": len(calls),
             "queries": [call["query"][:240] for call in calls],
         })
@@ -1447,6 +1507,11 @@ def _run_xiaomi_internal_tool_loop(
             None,
             result.retry_count,
         )
+        search_rounds_since_question += 1
+
+    if questioned_after_many_searches:
+        _prepend_xiaomi_search_reasoning_summary(result)
+
     if result.response_message.get("tool_calls"):
         log_debug("XIAOMI_INTERNAL_TOOL_LOOP_STOPPED", {
             "reason": "tool_calls_remain_after_max_rounds",

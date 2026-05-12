@@ -72,7 +72,12 @@ router built-in hosted tool. The router exposes Codex hosted search as an
 internal `do_web_search` function to the main Xiaomi model. If the model calls
 it, the router runs a separate non-streaming `mimo-v2-omni` search subrequest,
 feeds the result back as tool output, and asks the main model to continue. This
-does not yet provide a full Codex citation UI contract.
+does not yet provide a full Codex citation UI contract. Current production
+behavior also guards repeated agentic search: after five consecutive internal
+searches, the router asks the main model through a tool result whether it still
+needs to continue. If the model calls `do_web_search` again, search resumes with
+a fresh five-search window. Codex receives a reasoning summary
+`正在多次搜索，提醒用户` when that guardrail is triggered.
 
 Future work should define unsupported behavior first, then add provider support
 only when the execution and output lifecycle are clear.
@@ -83,6 +88,8 @@ TODO:
   annotation shape for `output_text`
 - add live replay fixtures for Xiaomi `do_web_search` result and annotation
   behavior
+- add live replay fixtures for Xiaomi repeated-search questioning and
+  insist-to-continue behavior
 - translate Xiaomi streamed search-source chunks if the router later exposes
   live search progress instead of the current built-in search completion item
 - decide whether provider-hosted search should expose query/action details when

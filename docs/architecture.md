@@ -182,6 +182,12 @@ Current Xiaomi behavior:
   `provider_state["xiaomi"]`
 - runs a separate `mimo-v2-omni` search subrequest only after the model calls
   `do_web_search`, then feeds the result back as a Chat tool output
+- after five consecutive internal search rounds, asks the main model through a
+  tool result whether it still needs more search; if the model calls
+  `do_web_search` again, the router resumes search with a fresh five-round
+  window
+- emits a Codex-facing reasoning summary `正在多次搜索，提醒用户` when the repeated
+  search guardrail is triggered
 - keeps main-request thinking separate from search retrieval; only the Xiaomi
   search subrequest uses `thinking.type = "disabled"`
 - returns JSON `null` as the internal tool output when Xiaomi search fails,

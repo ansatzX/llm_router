@@ -30,7 +30,8 @@ Avoid tests that only lock in incidental helper structure.
 - `tests/responses/state_and_deepseek.py`: session mutation, DeepSeek provider
   sidecars, and thinking-mode replay behavior.
 - `tests/responses/validation_and_tools.py`: tool-output validation,
-  unsupported tool handling, streaming SSE shape, and MCP-first routing.
+  unsupported tool handling, Xiaomi internal web-search continuation and
+  repeated-search guardrails, streaming SSE shape, and MCP-first routing.
 - `tests/test_deepseek_adapter.py`: DeepSeek request/response adapter behavior.
 - `tests/test_xiaomi_adapter.py`: Xiaomi request/response adapter behavior.
 - `tests/test_model_catalog.py`: static model catalog regressions.
@@ -90,6 +91,8 @@ Provider changes should include tests for:
 - provider response items becoming correct Responses output items
 - provider-private state being persisted only after success
 - upstream failure not mutating session state
+- provider-owned internal tool loops either terminating cleanly or proving their
+  continuation policy with tests
 
 If adding streaming, include event-order tests before live tests:
 

@@ -87,6 +87,23 @@ flowchart TD
     DS -.->|provider error| E2[Client-visible provider error<br/>no commit]
 ```
 
+### Xiaomi MiMo Chat Route
+
+```mermaid
+flowchart TD
+    C[Codex<br/>profile llm_router<br/>model mimo-*] --> R[llm_router<br/>Responses state machine]
+    R --> A[XiaomiChatAdapter<br/>preserve developer<br/>map thinking]
+    A --> T[Expose web_search as<br/>internal do_web_search]
+    T --> M[Xiaomi main model]
+    M -->|answer| O[Commit Responses output<br/>to Codex]
+    M -->|calls do_web_search| S[mimo-v2-omni<br/>Xiaomi web_search]
+    S --> M
+    M -->|after 5 searches| Q[Tool result asks<br/>continue searching?]
+    Q --> N[Reasoning summary<br/>正在多次搜索，提醒用户]
+    N --> M
+    M -->|insists| S
+```
+
 ### Third-Party DeepSeek Responses Passthrough
 
 ```mermaid
@@ -146,12 +163,15 @@ Then merge the relevant provider/profile settings from
 [`codex.config.example.toml`](codex.config.example.toml) into
 `~/.codex/config.toml`.
 
-The intended Codex usage is:
+The intended Codex usage is one `llm_router` profile:
 
 | Command | Provider | Model catalog | Default model |
 | --- | --- | --- | --- |
 | `codex -p llm_router` | Local `llm_router` provider | `~/.codex/llm_router.json` | `deepseek-v4-pro` |
-| `codex -p mimo` | Local `llm_router` provider | `~/.codex/llm_router.json` | `mimo-v2.5-pro` |
+
+MiMo is not a separate Codex profile. Use the same `llm_router` profile and
+select a `mimo-*` model from the `llm_router` model catalog; the router then
+matches that model to the Xiaomi route in [`router.toml`](router.toml).
 
 `env_key` in the Codex example is only a Codex-side placeholder for now. Real
 upstream keys are read by `llm-router` according to [`router.toml`](router.toml),
@@ -219,6 +239,12 @@ The adapter currently handles:
   Xiaomi as an internal `do_web_search` function. Only if the model calls it
   does the router run a separate `mimo-v2-omni` search subrequest and feed the
   result back as tool output.
+- Repeated Xiaomi internal search guardrails: after five consecutive
+  `do_web_search` rounds, the router returns an internal tool result asking the
+  main model whether it still needs to continue. If the model calls
+  `do_web_search` again, the router resumes searching and starts a new
+  five-round window. The Codex-facing response gets a reasoning summary
+  `正在多次搜索，提醒用户` when this guardrail is triggered.
 - Xiaomi `reasoning_content` conversion into Codex Responses reasoning items,
   with synthetic display summaries and raw reasoning preserved in Responses
   `content`.
@@ -236,7 +262,11 @@ providers. The main Xiaomi model request keeps its normal Codex-derived thinking
 setting and any remaining function tools. The search subrequest uses
 `thinking.type = "disabled"` for cheaper retrieval. If the search subrequest
 fails, the router logs `XIAOMI_BUILTIN_WEB_SEARCH_FAILED`, returns JSON `null`
-as the internal tool output, and lets the main model continue.
+as the internal tool output, and lets the main model continue. If the model keeps
+requesting search repeatedly, the router does not expose an unfinished
+`do_web_search` call to Codex; it injects an internal tool result that asks the
+model to either call `do_web_search` again or answer from the accumulated search
+context.
 
 The static catalog includes `mimo-v2.5-pro`, `mimo-v2.5`, `mimo-v2-pro`,
 `mimo-v2-omni`, and `mimo-v2-flash`. Image input is enabled only for the MiMo
@@ -253,8 +283,9 @@ only helper shape:
   [`tests/responses/validation_and_tools.py`](tests/responses/validation_and_tools.py)
   for multimodal request forwarding, Xiaomi-only `do_web_search` exposure,
   main-request `thinking` preservation, internal search continuation,
-  null-on-search-failure behavior, and function-tool preservation after hosted
-  search is replaced.
+  null-on-search-failure behavior, repeated-search questioning and continuation,
+  reasoning-summary notification for repeated search, and function-tool
+  preservation after hosted search is replaced.
 - provider sidecar persistence in
   [`tests/responses/state_and_deepseek.py`](tests/responses/state_and_deepseek.py)
   to keep Xiaomi `reasoning_content` replay isolated from DeepSeek state.
@@ -366,7 +397,7 @@ uv run python -m pytest tests/test_server_responses.py -q
 Run focused Xiaomi regressions:
 
 ```bash
-uv run python -m pytest tests/test_xiaomi_adapter.py tests/test_model_catalog.py tests/responses/validation_and_tools.py::test_responses_xiaomi_exposes_do_web_search_without_eager_search tests/responses/validation_and_tools.py::test_responses_xiaomi_runs_do_web_search_and_continues_main_request tests/responses/validation_and_tools.py::test_responses_xiaomi_do_web_search_failure_returns_null_tool_output tests/responses/validation_and_tools.py::test_responses_xiaomi_builtin_web_search_keeps_function_tools_on_main_request tests/responses/state_and_deepseek.py::test_responses_xiaomi_persists_provider_reasoning_state tests/responses/state_and_deepseek.py::test_responses_xiaomi_replays_provider_reasoning_state -q
+uv run python -m pytest tests/test_xiaomi_adapter.py tests/test_model_catalog.py tests/responses/validation_and_tools.py::test_responses_xiaomi_exposes_do_web_search_without_eager_search tests/responses/validation_and_tools.py::test_responses_xiaomi_runs_do_web_search_and_continues_main_request tests/responses/validation_and_tools.py::test_responses_xiaomi_do_web_search_failure_returns_null_tool_output tests/responses/validation_and_tools.py::test_responses_xiaomi_questions_model_after_five_searches_then_stops tests/responses/validation_and_tools.py::test_responses_xiaomi_continues_when_model_insists_after_search_question tests/responses/validation_and_tools.py::test_responses_xiaomi_builtin_web_search_keeps_function_tools_on_main_request tests/responses/state_and_deepseek.py::test_responses_xiaomi_persists_provider_reasoning_state tests/responses/state_and_deepseek.py::test_responses_xiaomi_replays_provider_reasoning_state -q
 ```
 
 Run lint:

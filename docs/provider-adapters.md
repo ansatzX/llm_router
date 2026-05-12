@@ -148,7 +148,11 @@ run a separate Xiaomi search subrequest only when called, and append the result
 as Chat tool output for continuation. Keep main-request `thinking` independent
 from search retrieval; only the Xiaomi search subrequest should use the cheap
 disabled-thinking retrieval setting. If search fails, log provider diagnostics
-and return JSON `null` as the internal tool output.
+and return JSON `null` as the internal tool output. If the main model requests
+more than five consecutive internal searches, append a tool result asking it
+whether to continue; if it calls `do_web_search` again, continue searching with
+a fresh five-search window. Add the Codex-facing reasoning summary
+`正在多次搜索，提醒用户` when this repeated-search guardrail is triggered.
 
 ## MiroThinker MCP-First
 
