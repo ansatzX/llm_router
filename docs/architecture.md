@@ -131,8 +131,8 @@ Current DeepSeek behavior:
 - restores flattened namespace child calls as Responses `function_call` items
   with `namespace` and child `name`
 - persists and replays `reasoning_content` required by DeepSeek thinking mode
-- exposes provider reasoning to Codex as raw reasoning content while using a
-  short synthetic summary for the Codex summary channel
+- exposes provider reasoning to Codex as raw reasoning content while using the
+  summary channel only as a sparse Codex display hint
 - replays historical namespace tool calls with the same flattened Chat function
   names that DeepSeek saw when the calls were created
 - recovers persisted DeepSeek sidecars by tool `call_id` when Codex resends
@@ -230,9 +230,40 @@ completed provider response:
 This is enough for current item, reasoning, text, and tool-argument delivery.
 It is not full Responses SSE parity.
 
+### Reasoning Summary Display
+
+Provider `reasoning_content` is raw reasoning and is preserved in Responses
+reasoning `content`. The router does not treat that raw text as a semantic
+summary. It uses reasoning `summary` only as a Codex UI display hint.
+
+For router-owned `responses_chat` routes, the router decides whether a completed
+turn would make Codex stop using the same observable conditions Codex uses after
+`response.completed`:
+
+- a `function_call` or `custom_tool_call` output item means Codex needs a
+  follow-up turn
+- `end_turn: false` also means Codex needs a follow-up turn
+- otherwise the turn is terminal
+
+Only terminal non-tool turns receive a visible summary. The visible text starts
+with `**少女折寿中**` so current Codex TUI can extract a header, followed by one
+random quote from `llm_router/quotes.json`. Tool-call turns keep an empty
+summary string so the Responses item shape is stable without adding UI noise.
+
+In live upstream streaming, the stop/follow-up decision is only known after the
+upstream stream finishes and the final Responses body has been reconstructed.
+The router therefore streams raw reasoning deltas immediately, then emits at
+most one `response.reasoning_summary_text.delta` just before
+`response.output_item.done` when the turn is terminal. Non-streaming JSON and
+simulated SSE carry the same final text in the reasoning item's `summary`.
+
 ## Logging
 
-`--debug` enables JSONL diagnostics in:
+`--debug` enables JSONL diagnostics and Flask's development reloader. Normal
+source edits restart the local router process automatically while the debug
+server is running.
+
+Diagnostics are written to:
 
 ```text
 llm_router.jsonl

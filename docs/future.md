@@ -10,6 +10,9 @@ Current status:
 - router-owned `responses_chat` now supports real upstream Chat streaming
   translated into Responses SSE
 - reasoning/text/tool-call deltas stream incrementally
+- terminal non-tool turns emit one late
+  `response.reasoning_summary_text.delta` for Codex TUI after the router knows
+  the completed turn will stop
 - session commit remains `commit-after-success`
 - mixed text+tool-call streaming in one turn is intentionally rejected by
   default, with an experimental opt-in path available
@@ -29,6 +32,8 @@ Recommended next phases:
 Important ordering rule:
 
 - emit `response.output_item.added` before `response.output_text.delta`
+- emit terminal visible reasoning-summary delta only after the upstream stream
+  finishes and before the matching reasoning `response.output_item.done`
 
 DeepSeek supports SSE Chat streaming with `stream: true` and optional
 `stream_options.include_usage: true`, but those chunks are Chat-shaped. They

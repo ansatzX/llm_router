@@ -114,9 +114,13 @@ mode is the current example: multi-round requests must replay
 
 Provider `reasoning_content` is raw reasoning, not a provider-authored summary.
 When the router emits Codex Responses reasoning items, keep the raw text in
-`content` and use a short synthetic display string in `summary`. Codex decides
-whether to show raw reasoning, but the router should not label raw provider
-thinking as a semantic summary.
+`content`. The `summary` field is only a Codex display hint, not a semantic
+summary of the provider's thinking. For router-owned Responses routes, visible
+summary text is emitted only on terminal non-tool turns; tool-call turns keep an
+empty summary string so the Responses item shape is stable without adding UI
+noise. Live streaming should wait until the final `response.completed` shape is
+known, then emit at most one `response.reasoning_summary_text.delta` before
+`response.output_item.done` when Codex would stop.
 
 Provider-private metadata should be stored under the session's
 `provider_state`, not in process-global mutable state. Update this sidecar only

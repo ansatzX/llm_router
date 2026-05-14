@@ -97,20 +97,6 @@ def iter_sse_events(
                     "event: response.reasoning_summary_part.added\n"
                     f"data: {json.dumps(part_added_event)}\n\n"
                 )
-                delta = part.get("text")
-                if delta:
-                    summary_delta_event = {
-                        "type": "response.reasoning_summary_text.delta",
-                        "output_index": idx,
-                        "item_id": item_id,
-                        "summary_index": summary_index,
-                        "delta": delta,
-                    }
-                    yield (
-                        "event: response.reasoning_summary_text.delta\n"
-                        f"data: {json.dumps(summary_delta_event)}\n\n"
-                    )
-
             for content_index, part in enumerate(content_parts):
                 if not isinstance(part, dict):
                     continue

@@ -5,8 +5,8 @@ from types import SimpleNamespace
 import llm_router.cli as cli
 
 
-def test_debug_serve_disables_flask_reloader(monkeypatch, tmp_path):
-    """Debug logging must not double-start the router process."""
+def test_debug_serve_enables_flask_reloader(monkeypatch, tmp_path):
+    """Debug serve should reload code changes during local development."""
     captured = {}
     cfg = SimpleNamespace(
         session_ttl_seconds=3600,
@@ -29,4 +29,4 @@ def test_debug_serve_disables_flask_reloader(monkeypatch, tmp_path):
     cli.cmd_serve(SimpleNamespace(config=None, debug=True))
 
     assert captured["debug"] is True
-    assert captured["use_reloader"] is False
+    assert captured["use_reloader"] is True

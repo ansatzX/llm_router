@@ -2,6 +2,7 @@
 
 import json
 
+import llm_router.reasoning_summary as reasoning_summary_mod
 import llm_router.server as server_mod
 from llm_router.config import UpstreamConfig
 from llm_router.llm_client import LLMRequestError
@@ -128,13 +129,47 @@ def test_responses_returns_reasoning_output_item(tmp_path, monkeypatch):
     reasoning = body["output"][0]
     assert reasoning["type"] == "reasoning"
     assert reasoning["summary"][0]["type"] == "summary_text"
-    assert reasoning["summary"][0]["text"]
     assert reasoning["summary"][0]["text"] != "plain response reasoning"
     assert reasoning["content"] == [
         {"type": "reasoning_text", "text": "plain response reasoning"},
     ]
     assert body["output"][1]["type"] == "message"
 
+
+def test_responses_sends_visible_reasoning_summary_on_completed_response(
+    tmp_path,
+    monkeypatch,
+):
+    client, _ = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": "hello",
+                        "reasoning_content": "plain response reasoning",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "responses_chat"
+    monkeypatch.setattr(reasoning_summary_mod.random, "choice", lambda _quotes: "quote")
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "test-model", "input": "hi"},
+    )
+
+    assert response.status_code == 200
+    reasoning = response.get_json()["output"][0]
+    assert reasoning["summary"] == [
+        {"type": "summary_text", "text": "**少女折寿中**\nquote"},
+    ]
 
 def test_responses_stream_emits_reasoning_deltas(tmp_path, monkeypatch):
     """Simulated SSE should expose reasoning deltas for Codex clients."""
@@ -189,8 +224,7 @@ def test_responses_stream_emits_reasoning_deltas(tmp_path, monkeypatch):
         "response.reasoning_text.delta",
     )
     assert b"response.reasoning_summary_part.added" in response.data
-    assert summary_deltas[0]["delta"]
-    assert summary_deltas[0]["delta"] != "plain response reasoning"
+    assert summary_deltas == []
     assert raw_deltas[0]["delta"] == "plain response reasoning"
 
 def test_responses_developer_role_is_forwarded_as_system(tmp_path, monkeypatch):
@@ -302,8 +336,7 @@ def test_responses_stream_uses_real_upstream_streaming_for_text_and_reasoning(
     summary_deltas = _sse_payloads(body, "response.reasoning_summary_text.delta")
     raw_deltas = _sse_payloads(body, "response.reasoning_text.delta")
     assert len(summary_deltas) == 1
-    assert summary_deltas[0]["delta"]
-    assert summary_deltas[0]["delta"] not in {"plan ", "step", "plan step"}
+    assert summary_deltas[0]["delta"].startswith("**少女折寿中**\n")
     assert [delta["delta"] for delta in raw_deltas] == ["plan ", "step"]
     assert '"type": "response.output_text.delta"' in body
     assert '"delta": "Hel"' in body
@@ -867,6 +900,67 @@ def test_responses_stream_tool_added_and_done_order_stay_consistent(
         (event["output_index"], event["item"]["call_id"])
         for event in done
     ] == [(0, "call_b"), (1, "call_a")]
+
+
+def test_responses_stream_emits_visible_summary_only_when_codex_will_stop(
+    tmp_path,
+    monkeypatch,
+):
+    """The visible summary should appear on the completed non-tool terminal turn."""
+    client, _ = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    def fake_stream(_payload, _base_url, _api_key):
+        yield {
+            "choices": [
+                {
+                    "delta": {"reasoning_content": "terminal reasoning"},
+                    "finish_reason": None,
+                },
+            ],
+            "usage": None,
+        }
+        yield {
+            "choices": [
+                {
+                    "delta": {"content": "done"},
+                    "finish_reason": "stop",
+                },
+            ],
+            "usage": {
+                "prompt_tokens": 2,
+                "completion_tokens": 2,
+                "total_tokens": 4,
+            },
+        }
+
+    monkeypatch.setattr(server_mod, "make_llm_stream_request", fake_stream)
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "test-model", "input": "finish", "stream": True},
+    )
+    body = response.get_data(as_text=True)
+
+    assert response.status_code == 200
+    summary_deltas = _sse_payloads(body, "response.reasoning_summary_text.delta")
+    assert len(summary_deltas) == 1
+    assert summary_deltas[0]["delta"].startswith("**少女折寿中**\n")
+    done = _sse_payloads(body, "response.output_item.done")
+    reasoning_items = [event["item"] for event in done if event["item"]["type"] == "reasoning"]
+    assert reasoning_items[0]["summary"][0]["text"].startswith("**少女折寿中**\n")
 
 
 def test_responses_stream_late_reasoning_after_tool_fails_without_commit(

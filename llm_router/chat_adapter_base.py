@@ -501,10 +501,13 @@ class ChatCompletionAdapterBase:
 
         output_items: list[dict[str, Any]] = []
         if reasoning_content:
-            summary_text = (
-                message.get("reasoning_summary")
-                or reasoning_summary_text(reasoning_content)
-            )
+            if "reasoning_summary" in message:
+                summary_text = str(message.get("reasoning_summary") or "")
+            else:
+                summary_text = reasoning_summary_text(
+                    reasoning_content,
+                    will_stop=not native_tool_calls,
+                )
             output_items.append({
                 "type": "reasoning",
                 "summary": [{"type": "summary_text", "text": summary_text}],

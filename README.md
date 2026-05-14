@@ -191,7 +191,9 @@ With debug logs:
 uv run llm-router serve --debug
 ```
 
-Debug logs are written to `llm_router.jsonl` as JSONL.
+Debug logs are written to `llm_router.jsonl` as JSONL. `--debug` also enables
+Flask's development reloader, so normal source edits restart the local router
+process automatically while you are diagnosing or iterating.
 
 Launch Codex through the router profile:
 
@@ -212,8 +214,9 @@ The adapter currently handles:
 - DeepSeek-route filtering for unsupported hosted Responses tools such as
   `web_search`.
 - DeepSeek Chat `tool_calls` back to Codex Responses output items.
-- DeepSeek `reasoning_content` round trip when available, with synthetic
-  display summaries and raw reasoning preserved in Responses `content`.
+- DeepSeek `reasoning_content` round trip when available, with raw reasoning
+  preserved in Responses `content` and short Codex-facing display summaries
+  emitted only on terminal non-tool turns.
 - Tool-call ordering repairs when Codex inserts side-channel messages between a
   tool call and its tool output.
 - DeepSeek-specific payload filtering so Responses metadata such as
@@ -246,8 +249,8 @@ The adapter currently handles:
   five-round window. The Codex-facing response gets a reasoning summary
   `正在多次搜索，提醒用户` when this guardrail is triggered.
 - Xiaomi `reasoning_content` conversion into Codex Responses reasoning items,
-  with synthetic display summaries and raw reasoning preserved in Responses
-  `content`.
+  with raw reasoning preserved in Responses `content` and short Codex-facing
+  display summaries emitted only on terminal non-tool turns.
 - Xiaomi thinking/tool replay state under `provider_state["xiaomi"]`, isolated
   from DeepSeek provider state.
 - Xiaomi web-search `annotations` on final text responses for clients that keep
@@ -358,6 +361,24 @@ incrementally for:
 
 The router still preserves `commit-after-success`: session state is committed
 only after upstream success.
+
+Reasoning display summaries are intentionally sparse. Provider
+`reasoning_content` is raw reasoning and stays in Responses reasoning
+`content`. The router uses the summary channel only as a Codex UI display hint:
+
+- If a `response.completed` turn would make Codex stop, meaning there is no
+  `function_call` or `custom_tool_call` output item and `end_turn` is not
+  `false`, the first reasoning summary is set to `**少女折寿中**` plus one random
+  quote from [`llm_router/quotes.json`](llm_router/quotes.json).
+- If the turn contains tool calls, or an upstream/native Responses response
+  explicitly says `end_turn: false`, the reasoning summary text is an empty
+  string so the Responses item shape is preserved without adding visual noise.
+- In live streaming, the router waits until the upstream stream is complete and
+  the stop/follow-up decision is known, then emits at most one
+  `response.reasoning_summary_text.delta` before `response.output_item.done`.
+  This is the path current Codex TUI uses for visible reasoning-summary blocks.
+- Simulated SSE and non-streaming JSON carry the same final summary text in the
+  reasoning output item.
 
 Current explicit constraint:
 

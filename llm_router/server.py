@@ -489,7 +489,6 @@ def _live_stream_router_owned_responses(
         tool_next_anon_index = -1
         usage_raw: dict[str, Any] = {}
         finish_reason: str | None = None
-        reasoning_summary: str | None = None
 
         yield _emit_sse(
             "response.created",
@@ -537,7 +536,6 @@ def _live_stream_router_owned_responses(
                             )
                         if not reasoning_part_started:
                             reasoning_part_started = True
-                            reasoning_summary = reasoning_summary_text(reasoning_delta)
                             yield _emit_sse(
                                 "response.reasoning_summary_part.added",
                                 {
@@ -550,18 +548,6 @@ def _live_stream_router_owned_responses(
                             )
 
                         reasoning_parts.append(reasoning_delta)
-                        if reasoning_summary:
-                            yield _emit_sse(
-                                "response.reasoning_summary_text.delta",
-                                {
-                                    "type": "response.reasoning_summary_text.delta",
-                                    "output_index": 0,
-                                    "item_id": reasoning_item_id,
-                                    "summary_index": 0,
-                                    "delta": reasoning_summary,
-                                },
-                            )
-                            reasoning_summary = None
                         yield _emit_sse(
                             "response.reasoning_text.delta",
                             {
@@ -739,10 +725,8 @@ def _live_stream_router_owned_responses(
                 response_message["content"] = ""
             if reasoning_parts:
                 response_message["reasoning_content"] = "".join(reasoning_parts)
-                if reasoning_summary is None:
-                    response_message["reasoning_summary"] = reasoning_summary_text(
-                        reasoning_parts[0],
-                    )
+                if tool_seen_order:
+                    response_message["reasoning_summary"] = ""
             if tool_seen_order:
                 for index in tool_seen_order:
                     state = tool_states[index]
@@ -827,6 +811,18 @@ def _live_stream_router_owned_responses(
                 retry_count=0,
             )
             response_body = _commit_and_build_responses_body(context, result, model)
+            reasoning_summary = _first_reasoning_summary_text(result.output_items)
+            if reasoning_started and reasoning_summary:
+                yield _emit_sse(
+                    "response.reasoning_summary_text.delta",
+                    {
+                        "type": "response.reasoning_summary_text.delta",
+                        "output_index": 0,
+                        "item_id": reasoning_item_id,
+                        "summary_index": 0,
+                        "delta": reasoning_summary,
+                    },
+                )
 
             for idx, item in enumerate(result.output_items):
                 item_done_event = {
@@ -1336,6 +1332,57 @@ def _combine_responses_usage(
     }
 
 
+def _codex_will_stop_after_completed(response_body: dict[str, Any]) -> bool:
+    if response_body.get("end_turn") is False:
+        return False
+    for item in response_body.get("output", []):
+        if isinstance(item, dict) and item.get("type") in {
+            "function_call",
+            "custom_tool_call",
+        }:
+            return False
+    return True
+
+
+def _update_reasoning_summary_visibility(
+    output_items: list[dict[str, Any]],
+    *,
+    will_stop: bool,
+) -> None:
+    for item in output_items:
+        if item.get("type") != "reasoning":
+            continue
+        summary = item.get("summary")
+        if not isinstance(summary, list) or not summary:
+            continue
+        first_part = summary[0]
+        if not isinstance(first_part, dict):
+            continue
+        reasoning_content = ""
+        for part in item.get("content", []):
+            if isinstance(part, dict) and part.get("type") == "reasoning_text":
+                reasoning_content += str(part.get("text") or "")
+        first_part["text"] = reasoning_summary_text(
+            reasoning_content,
+            will_stop=will_stop,
+        )
+        break
+
+
+def _first_reasoning_summary_text(output_items: list[dict[str, Any]]) -> str:
+    for item in output_items:
+        if item.get("type") != "reasoning":
+            continue
+        summary = item.get("summary")
+        if not isinstance(summary, list) or not summary:
+            return ""
+        first_part = summary[0]
+        if not isinstance(first_part, dict):
+            return ""
+        return str(first_part.get("text") or "")
+    return ""
+
+
 def _responses_provider_result_from_llm(
     context: _ResponsesTurnContext,
     llm_response: dict[str, Any],
@@ -1598,12 +1645,6 @@ def _commit_and_build_responses_body(
             result.output_items,
         ),
     )
-    context.state_machine.commit_response(
-        context.turn,
-        result.output_items,
-        provider_state_updates,
-    )
-
     response = {
         "id": context.turn.response_id,
         "object": "response",
@@ -1625,6 +1666,16 @@ def _commit_and_build_responses_body(
         }
     if result.tool_calls_list:
         response["tool_calls"] = result.tool_calls_list
+
+    _update_reasoning_summary_visibility(
+        result.output_items,
+        will_stop=_codex_will_stop_after_completed(response),
+    )
+    context.state_machine.commit_response(
+        context.turn,
+        result.output_items,
+        provider_state_updates,
+    )
 
     log_debug("CLIENT_RESPONSE /v1/responses", {
         "status": "success",

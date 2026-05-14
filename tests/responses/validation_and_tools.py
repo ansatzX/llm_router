@@ -1449,8 +1449,7 @@ def test_responses_chat_route_returns_reasoning_content_on_tool_call_items(
     reasoning = body["output"][0]
     assert reasoning["type"] == "reasoning"
     assert reasoning["summary"][0]["type"] == "summary_text"
-    assert reasoning["summary"][0]["text"]
-    assert reasoning["summary"][0]["text"] != "I should list files first."
+    assert reasoning["summary"][0]["text"] == ""
     assert reasoning["content"] == [
         {"type": "reasoning_text", "text": "I should list files first."},
     ]

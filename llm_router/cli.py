@@ -55,7 +55,7 @@ def cmd_serve(args):
         host=cfg.server_host,
         port=cfg.server_port,
         debug=args.debug,
-        use_reloader=False,
+        use_reloader=args.debug,
     )
 
 
