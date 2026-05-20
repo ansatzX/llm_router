@@ -24,6 +24,12 @@ route contract.
 Use explicit route-level `upstream_model` for provider model-name translation.
 Do not hard-code normal model aliases in the transport layer.
 
+Provider-owned compatibility aliases belong in the provider adapter, not in the
+generic router. The current example is DeepSeek-only Codex mini compatibility:
+when a request has already resolved to the DeepSeek adapter, `gpt-*-mini` is
+translated to `deepseek-v4-flash`. This must not create a broad `gpt-*` route
+or make unrelated upstreams handle Codex mini model names.
+
 If a provider owns a compatible native `/v1/responses` endpoint, use an explicit
 `type = "responses_passthrough"` route. Do not infer passthrough from names like
 `deepseek` or from a non-official base URL.
@@ -122,6 +128,12 @@ noise. Live streaming should wait until the final `response.completed` shape is
 known, then emit at most one `response.reasoning_summary_text.delta` before
 `response.output_item.done` when Codex would stop.
 
+Status-only reasoning items inserted by the router are different from provider
+reasoning. If an item has no `reasoning_text`, do not replace its summary with
+the random quote display summary. For Xiaomi repeated-search guardrails, the
+status summary `正在多次搜索，提醒用户` must remain before any provider reasoning
+summary.
+
 Provider-private metadata should be stored under the session's
 `provider_state`, not in process-global mutable state. Update this sidecar only
 as part of a successful response commit.
@@ -156,7 +168,8 @@ and return JSON `null` as the internal tool output. If the main model requests
 more than five consecutive internal searches, append a tool result asking it
 whether to continue; if it calls `do_web_search` again, continue searching with
 a fresh five-search window. Add the Codex-facing reasoning summary
-`正在多次搜索，提醒用户` when this repeated-search guardrail is triggered.
+`正在多次搜索，提醒用户` when this repeated-search guardrail is triggered, and keep
+that status summary ahead of provider reasoning summaries.
 
 ## MiroThinker MCP-First
 

@@ -648,7 +648,10 @@ def test_responses_xiaomi_continues_when_model_insists_after_search_question(
             "created": 123,
             "choices": [
                 {
-                    "message": {"content": "final after insisted search"},
+                    "message": {
+                        "content": "final after insisted search",
+                        "reasoning_content": "provider reasoning after search",
+                    },
                     "finish_reason": "stop",
                 }
             ],
@@ -679,11 +682,21 @@ def test_responses_xiaomi_continues_when_model_insists_after_search_question(
     search_payload = mock_make_request.call_args_list[12].args[0]
     assert search_payload["messages"] == [{"role": "user", "content": "query 7"}]
     body = response.get_json()
-    assert [item["type"] for item in body["output"]] == ["reasoning", "message"]
+    assert [item["type"] for item in body["output"]] == [
+        "reasoning",
+        "reasoning",
+        "message",
+    ]
     assert body["output"][0]["summary"] == [
         {"type": "summary_text", "text": "正在多次搜索，提醒用户"}
     ]
-    assert body["output"][1]["content"][0]["text"] == "final after insisted search"
+    assert body["output"][0]["content"] == []
+    assert body["output"][1]["summary"][0]["text"].startswith("**")
+    assert body["output"][1]["summary"][0]["text"] != "正在多次搜索，提醒用户"
+    assert body["output"][1]["content"] == [
+        {"type": "reasoning_text", "text": "provider reasoning after search"}
+    ]
+    assert body["output"][2]["content"][0]["text"] == "final after insisted search"
     assert any(
         event == "XIAOMI_INTERNAL_WEB_SEARCH_TOOL_CALLS"
         and data["round"] == 1

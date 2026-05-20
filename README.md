@@ -21,11 +21,17 @@ The default route config is in [`router.toml`](router.toml).
 | `deepseek-*` | `responses_chat` | `deepseek` | Main supported route. Router keeps Responses state and adapts to upstream Chat `function` tools. |
 | `mimo-*` | `responses_chat` | `xiaomi` | Xiaomi MiMo official Chat API route. Router keeps Responses state, preserves `developer`, and adapts thinking/tool replay. |
 | `mirothinker-*` | `mcp_first` | `mirothinker` | MCP-first route. Native tools are converted to an MCP XML prompt. |
+| fallback | `responses_chat` | `deepseek` | Unmatched Codex text models default to the DeepSeek Chat adapter. |
 
 Third-party providers that expose a compatible native `/v1/responses` endpoint
 can be configured explicitly with `type = "responses_passthrough"`. Official
 DeepSeek at `https://api.deepseek.com` should stay on the `responses_chat`
 route because this router targets DeepSeek's Chat API there.
+
+AIHubMix is configured as the named upstream `aihubmix`, not as the default
+upstream. There is no broad `gpt-*` or `claude-*` route to AIHubMix in the
+default config. If a deployment wants AIHubMix to own a native Responses route,
+add an explicit route for that upstream instead of relying on fallback routing.
 
 ```toml
 [upstream.deepseek]
@@ -213,6 +219,11 @@ The adapter currently handles:
   tools.
 - DeepSeek-route filtering for unsupported hosted Responses tools such as
   `web_search`.
+- Codex small-model compatibility names matching `gpt-*-mini` to
+  `deepseek-v4-flash` inside the DeepSeek adapter only. When this rewrite is
+  used and no explicit DeepSeek `thinking` value is present, the adapter sends
+  `thinking.type = "disabled"` so Codex low-effort requests do not accidentally
+  enable provider thinking.
 - DeepSeek Chat `tool_calls` back to Codex Responses output items.
 - DeepSeek `reasoning_content` round trip when available, with raw reasoning
   preserved in Responses `content` and short Codex-facing display summaries
@@ -247,7 +258,9 @@ The adapter currently handles:
   main model whether it still needs to continue. If the model calls
   `do_web_search` again, the router resumes searching and starts a new
   five-round window. The Codex-facing response gets a reasoning summary
-  `正在多次搜索，提醒用户` when this guardrail is triggered.
+  `正在多次搜索，提醒用户` when this guardrail is triggered. This status summary is
+  inserted before provider reasoning summaries and must not be replaced by the
+  random quote display summary.
 - Xiaomi `reasoning_content` conversion into Codex Responses reasoning items,
   with raw reasoning preserved in Responses `content` and short Codex-facing
   display summaries emitted only on terminal non-tool turns.
@@ -373,10 +386,17 @@ Reasoning display summaries are intentionally sparse. Provider
 - If the turn contains tool calls, or an upstream/native Responses response
   explicitly says `end_turn: false`, the reasoning summary text is an empty
   string so the Responses item shape is preserved without adding visual noise.
+- Router-owned status summaries, such as Xiaomi's repeated-search warning
+  `正在多次搜索，提醒用户`, are not provider reasoning summaries. They stay before
+  later provider reasoning items and are not rewritten to random quotes.
 - In live streaming, the router waits until the upstream stream is complete and
   the stop/follow-up decision is known, then emits at most one
   `response.reasoning_summary_text.delta` before `response.output_item.done`.
   This is the path current Codex TUI uses for visible reasoning-summary blocks.
+- Live streaming must keep item identity stable: the item IDs emitted in
+  `response.output_item.added`, `response.output_item.done`, and the final
+  `response.completed.response.output[]` item must match. Otherwise Codex App
+  can render one upstream answer as duplicate assistant messages.
 - Simulated SSE and non-streaming JSON carry the same final summary text in the
   reasoning output item.
 

@@ -108,6 +108,9 @@ Router rule:
 
 - only rewrite memory models after identifying a memory workload
 - do not rewrite normal user `gpt-5.4` requests based on model name alone
+- do not implement `gpt-*-mini` as a generic router or memory rewrite; Codex
+  mini compatibility is currently a DeepSeek adapter-local translation to
+  `deepseek-v4-flash` after the request has already resolved to DeepSeek
 
 ## Realtime Defaults
 

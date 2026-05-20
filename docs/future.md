@@ -82,7 +82,9 @@ behavior also guards repeated agentic search: after five consecutive internal
 searches, the router asks the main model through a tool result whether it still
 needs to continue. If the model calls `do_web_search` again, search resumes with
 a fresh five-search window. Codex receives a reasoning summary
-`正在多次搜索，提醒用户` when that guardrail is triggered.
+`正在多次搜索，提醒用户` when that guardrail is triggered. That summary is a
+router-owned status item, so it stays before provider reasoning summaries and is
+not rewritten to the random quote display summary.
 
 Future work should define unsupported behavior first, then add provider support
 only when the execution and output lifecycle are clear.

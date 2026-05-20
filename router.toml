@@ -7,7 +7,7 @@ mcp_server_name = "tools"
 
 # ── Upstream LLM providers ─────────────────────────────────────────────────
 
-[upstream.default]
+[upstream.aihubmix]
 base_url = "https://aihubmix.com/v1"
 api_key_env = "AIHUBMIX_API_KEY"
 
@@ -75,18 +75,8 @@ pattern = "mimo-*"
 type = "responses_chat"
 upstream = "xiaomi"
 
-[[routes]]
-pattern = "gpt-*"
-type = "responses"
-upstream = "default"
-
-[[routes]]
-pattern = "claude-*"
-type = "responses"
-upstream = "default"
-
 # ── Default fallback ───────────────────────────────────────────────────────
 
 [default_route]
-type = "responses"
-upstream = "default"
+type = "responses_chat"
+upstream = "deepseek"

@@ -333,6 +333,12 @@ def test_responses_stream_uses_real_upstream_streaming_for_text_and_reasoning(
     }
     assert added[1]["item"]["type"] == "message"
     assert added[1]["item"]["content"] == [{"type": "output_text", "text": ""}]
+    done = _sse_payloads(body, "response.output_item.done")
+    completed = _sse_payloads(body, "response.completed")
+    assert done[0]["item"]["id"] == added[0]["item"]["id"]
+    assert done[1]["item"]["id"] == added[1]["item"]["id"]
+    assert completed[0]["response"]["output"][0]["id"] == added[0]["item"]["id"]
+    assert completed[0]["response"]["output"][1]["id"] == added[1]["item"]["id"]
     summary_deltas = _sse_payloads(body, "response.reasoning_summary_text.delta")
     raw_deltas = _sse_payloads(body, "response.reasoning_text.delta")
     assert len(summary_deltas) == 1

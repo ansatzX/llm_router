@@ -71,7 +71,6 @@ _mirothinker_adapter = MiroThinkerMCPAdapter()
 app = Flask(__name__)
 
 _MEMORY_MODEL_ALIASES = {
-    "gpt-5.4-mini": "deepseek-v4-flash",
     "gpt-5.4": "deepseek-v4-pro",
 }
 _MEMORY_PROMPT_MARKERS = (
@@ -472,6 +471,21 @@ def _live_stream_router_owned_responses(
     response_id = context.turn.response_id
     created_ts = int(time.time())
 
+    def _sync_final_output_item_ids(
+        output_items: list[dict[str, Any]],
+        reasoning_id: str,
+        message_id: str,
+        has_reasoning: bool,
+        has_message: bool,
+    ) -> None:
+        """Keep streamed added/delta items and final done/completed items identical."""
+        for item in output_items:
+            item_type = item.get("type")
+            if item_type == "reasoning" and has_reasoning:
+                item["id"] = reasoning_id
+            elif item_type == "message" and has_message:
+                item["id"] = message_id
+
     def _generate() -> Any:
         reasoning_item_id = f"rsn_{uuid.uuid4().hex[:8]}"
         message_item_id = f"msg_{uuid.uuid4().hex[:8]}"
@@ -809,6 +823,13 @@ def _live_stream_router_owned_responses(
                 llm_response,
                 parse_result=None,
                 retry_count=0,
+            )
+            _sync_final_output_item_ids(
+                result.output_items,
+                reasoning_item_id,
+                message_item_id,
+                reasoning_started,
+                message_started,
             )
             response_body = _commit_and_build_responses_body(context, result, model)
             reasoning_summary = _first_reasoning_summary_text(result.output_items)
@@ -1362,6 +1383,8 @@ def _update_reasoning_summary_visibility(
         for part in item.get("content", []):
             if isinstance(part, dict) and part.get("type") == "reasoning_text":
                 reasoning_content += str(part.get("text") or "")
+        if not reasoning_content:
+            continue
         first_part["text"] = reasoning_summary_text(
             reasoning_content,
             will_stop=will_stop,

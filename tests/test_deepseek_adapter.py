@@ -56,6 +56,24 @@ def test_deepseek_maps_responses_reasoning_effort_and_drops_service_tier():
     }
 
 
+def test_deepseek_rewrites_codex_mini_alias_to_flash_without_thinking():
+    adapter = DeepSeekChatAdapter()
+
+    filtered = adapter.filter_request_payload({
+        "model": "gpt-5.4-mini",
+        "messages": [{"role": "user", "content": "title this chat"}],
+        "stream": False,
+        "reasoning": {"effort": "low"},
+    })
+
+    assert filtered == {
+        "model": "deepseek-v4-flash",
+        "messages": [{"role": "user", "content": "title this chat"}],
+        "stream": False,
+        "thinking": {"type": "disabled"},
+    }
+
+
 def test_deepseek_gateway_can_forward_compat_prompt_cache_fields():
     adapter = DeepSeekChatAdapter(forward_compat_prompt_cache=True)
 
@@ -293,7 +311,7 @@ def test_deepseek_restores_chat_response_tool_calls_to_responses_items():
     assert tool_calls[0]["id"] == "call_patch"
     assert output_items[0]["type"] == "reasoning"
     assert output_items[0]["summary"][0]["type"] == "summary_text"
-    assert output_items[0]["summary"][0]["text"]
+    assert output_items[0]["summary"][0]["text"] == ""
     assert output_items[0]["summary"][0]["text"] != "edit the file"
     assert output_items[0]["content"] == [
         {"type": "reasoning_text", "text": "edit the file"},

@@ -122,6 +122,10 @@ Current DeepSeek behavior:
 - drops unsupported Responses-only fields such as `client_metadata`
 - maps `reasoning.effort` to Chat-compatible `reasoning_effort`
 - normalizes `developer` role for Chat backends
+- rewrites Codex small-model compatibility names matching `gpt-*-mini` to
+  `deepseek-v4-flash` inside the DeepSeek adapter only; when that rewrite is
+  used and no explicit DeepSeek `thinking` value is present, the adapter sends
+  `thinking.type = "disabled"` and removes `reasoning_effort`
 - rewrites Codex `custom` tools into Chat `function` tools
 - expands Codex `namespace` child tools into provider-visible Chat
   `function` tools
@@ -187,7 +191,8 @@ Current Xiaomi behavior:
   `do_web_search` again, the router resumes search with a fresh five-round
   window
 - emits a Codex-facing reasoning summary `正在多次搜索，提醒用户` when the repeated
-  search guardrail is triggered
+  search guardrail is triggered; this router-owned status summary is kept before
+  provider reasoning summaries and is not rewritten to a random quote
 - keeps main-request thinking separate from search retrieval; only the Xiaomi
   search subrequest uses `thinking.type = "disabled"`
 - returns JSON `null` as the internal tool output when Xiaomi search fails,
@@ -230,6 +235,13 @@ completed provider response:
 This is enough for current item, reasoning, text, and tool-argument delivery.
 It is not full Responses SSE parity.
 
+For a streamed item, identity must be stable across the SSE lifecycle:
+`response.output_item.added.item.id`, the matching
+`response.output_item.done.item.id`, and the corresponding
+`response.completed.response.output[].id` must be the same. Codex App treats
+different IDs as different assistant items and can otherwise render duplicate
+answers.
+
 ### Reasoning Summary Display
 
 Provider `reasoning_content` is raw reasoning and is preserved in Responses
@@ -249,6 +261,9 @@ Only terminal non-tool turns receive a visible summary. The visible text starts
 with `**少女折寿中**` so current Codex TUI can extract a header, followed by one
 random quote from `llm_router/quotes.json`. Tool-call turns keep an empty
 summary string so the Responses item shape is stable without adding UI noise.
+Router-owned status reasoning items with no `reasoning_text`, such as Xiaomi's
+`正在多次搜索，提醒用户`, are skipped by random quote generation so they remain
+visible before any later provider reasoning summary.
 
 In live upstream streaming, the stop/follow-up decision is only known after the
 upstream stream finishes and the final Responses body has been reconstructed.

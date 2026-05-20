@@ -224,6 +224,44 @@ def test_responses_can_rewrite_requested_model_to_provider_model(
     assert payload["model"] == "deepseek-v4-flash"
     assert response.get_json()["model"] == "gpt-5.4-mini"
 
+
+def test_deepseek_adapter_rewrites_codex_mini_alias_after_routing(
+    tmp_path,
+    monkeypatch,
+):
+    """Codex mini aliases are rewritten only after routing to DeepSeek."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "gpt-5.4-mini",
+            "input": "title this chat",
+            "reasoning": {"effort": "low"},
+        },
+    )
+
+    assert response.status_code == 200
+    payload = mock_make_request.call_args.args[0]
+    assert payload["model"] == "deepseek-v4-flash"
+    assert payload["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in payload
+    assert response.get_json()["model"] == "gpt-5.4-mini"
+
+
 def test_responses_passthrough_route_uses_provider_responses_api(
     tmp_path,
     monkeypatch,
@@ -432,11 +470,11 @@ def test_responses_passthrough_continuation_failure_does_not_fallback_locally(
     assert mock_make_responses_request.call_count == 1
     assert mock_make_request.call_count == 0
 
-def test_responses_memory_phase_one_request_rewrites_only_fixed_small_model(
+def test_responses_memory_phase_one_request_uses_deepseek_mini_alias(
     tmp_path,
     monkeypatch,
 ):
-    """Memory phase-1 prompt should override gpt-5.4-mini to DeepSeek flash."""
+    """Memory phase-1 mini requests should use the DeepSeek adapter alias."""
     client, mock_make_request = _configure_test_app(
         tmp_path,
         monkeypatch,
@@ -446,14 +484,11 @@ def test_responses_memory_phase_one_request_rewrites_only_fixed_small_model(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    server_mod._config.upstreams["default"] = UpstreamConfig(
-        base_url="https://aihubmix.com/v1",
-    )
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
     )
-    server_mod._config.default_model_type = "responses"
-    server_mod._config.default_upstream = "default"
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.default_upstream = "deepseek"
 
     response = client.post(
         "/v1/responses",
@@ -470,6 +505,7 @@ def test_responses_memory_phase_one_request_rewrites_only_fixed_small_model(
     assert response.status_code == 200
     payload, base_url = mock_make_request.call_args.args[:2]
     assert payload["model"] == "deepseek-v4-flash"
+    assert payload["thinking"] == {"type": "disabled"}
     assert base_url == "https://api.deepseek.com"
     assert response.get_json()["model"] == "gpt-5.4-mini"
 

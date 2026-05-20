@@ -97,10 +97,14 @@ Provider changes should include tests for:
 If adding streaming, include event-order tests before live tests:
 
 - `response.output_item.added` before `response.output_text.delta`
+- streamed `response.output_item.added`, matching `response.output_item.done`,
+  and final `response.completed.response.output[]` items use the same item ID
 - terminal non-tool reasoning turns emit exactly one visible
   `response.reasoning_summary_text.delta`
 - tool-call reasoning turns preserve an empty summary and do not emit a visible
   reasoning-summary delta
+- router-owned status summaries such as Xiaomi repeated-search warnings stay
+  before provider reasoning summaries and are not rewritten as random quotes
 - accumulated final item equals non-streaming final item
 - failed or truncated stream does not commit partial state
 

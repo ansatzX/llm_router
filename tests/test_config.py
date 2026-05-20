@@ -13,6 +13,19 @@ def test_deepseek_models_route_as_responses_chat():
     assert upstream.base_url == "https://api.deepseek.com"
 
 
+def test_default_route_uses_deepseek_not_aihubmix():
+    """Default routing should not send unmatched Codex models to AIHubMix."""
+    cfg = RouterConfig.from_toml("router.toml")
+
+    model_type, upstream, upstream_model = cfg.resolve_request("gpt-5.4-mini")
+
+    assert model_type == "responses_chat"
+    assert upstream.base_url == "https://api.deepseek.com"
+    assert upstream_model == "gpt-5.4-mini"
+    assert "aihubmix" in cfg.upstreams
+    assert "default" not in cfg.upstreams
+
+
 def test_mimo_models_route_as_responses_chat():
     """Xiaomi MiMo routes through stateful Responses with Chat upstream adapter."""
     cfg = RouterConfig.from_toml("router.toml")

@@ -150,6 +150,9 @@ Bad cases:
 - implementing a parallel Codex tool permission system in the router
 - rewriting normal user `gpt-5.4` requests as memory jobs based on model name
   alone
+- implementing `gpt-*-mini` as a global router alias; Codex mini compatibility
+  currently belongs inside the DeepSeek adapter after routing has selected
+  DeepSeek
 - treating `Fast` as a collaboration mode; it is a service-tier request field
 
 ## Streaming Boundary
@@ -159,7 +162,9 @@ must be translated into Codex-compatible event ordering.
 
 Do not forward DeepSeek or other Chat chunks directly to Codex. Text deltas
 need a valid output item lifecycle, including `response.output_item.added`
-before `response.output_text.delta`.
+before `response.output_text.delta`. The item IDs in `output_item.added`,
+`output_item.done`, and final `response.completed.response.output[]` must also
+match, or Codex App can render a single assistant answer as duplicate messages.
 
 Implement streaming in phases:
 
