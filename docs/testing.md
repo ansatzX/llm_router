@@ -81,6 +81,24 @@ Set `MIMO_BASE_URL` to test a Token Plan cluster and `MIMO_LIVE_MODEL` to test a
 specific MiMo deployment. These tests call Xiaomi directly and consume provider
 quota.
 
+Current Xiaomi regressions cover the meaningful provider boundary rather than
+only helper shape:
+
+- adapter conversion in `tests/test_xiaomi_adapter.py` for request filtering,
+  `thinking` mapping, `developer` role preservation, image parts, structured
+  tool-output images, Xiaomi web-search conversion, annotations, and reasoning
+  replay.
+- `/v1/responses` behavior in `tests/responses/validation_and_tools.py` for
+  multimodal request forwarding, Xiaomi-only `do_web_search` exposure,
+  main-request `thinking` preservation, internal search continuation,
+  null-on-search-failure behavior, repeated-search questioning and continuation,
+  reasoning-summary notification for repeated search, and function-tool
+  preservation after hosted search is replaced.
+- provider sidecar persistence in `tests/responses/state_and_deepseek.py` to
+  keep Xiaomi `reasoning_content` replay isolated from DeepSeek state.
+- catalog and route regressions in `tests/test_model_catalog.py` and
+  `tests/test_config.py`.
+
 ## Test Expectations For Provider Work
 
 Provider changes should include tests for:
