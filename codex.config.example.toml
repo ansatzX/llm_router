@@ -1,14 +1,13 @@
 model = "gpt-5.5"
 model_reasoning_effort = "high"
-show_raw_agent_reasoning = true
 
 [model_providers]
 [model_providers.llm_router]
 name = "llm_router"
 base_url = "http://127.0.0.1:9876/v1"
-env_key = "AIHUBMIX_API_KEY"
 wire_api = "responses"
 requires_openai_auth = false
+
 [model_providers.aihubmix]
 name = "aihubmix"
 base_url = "https://aihubmix.com/v1"
@@ -16,29 +15,32 @@ env_key = "AIHUBMIX_API_KEY"
 wire_api = "responses"
 requires_openai_auth = false
 
-[profiles.llm_router]
-model_provider = "llm_router"
-model = "deepseek-v4-pro"
-model_catalog_json = "~/.codex/llm_router.json"
-
-[profiles.aihubmix]
-model_provider = "aihubmix"
-model = "gpt-5.5"
-model_catalog_json = "~/.codex/aihubmix.json"
-
-
-
-[mcp_servers]
-
-[mcp_servers.Local_Read]
-type = "stdio"
-command = "uv"
-args = ["--directory", "/Users/ansatz/data/code/Local_Read_MCP", "run", "--with", "local_read_mcp", "python", "-m", "local_read_mcp.server"]
-
-
-[plugins."superpowers@openai-curated"]
-enabled = true
-
 
 [tui]
-status_line = ["model-with-reasoning", "current-dir", "git-branch", "run-state", "context-used", "five-hour-limit", "context-window-size", "fast-mode"]
+status_line = [
+    "model-with-reasoning",
+    "current-dir",
+    "git-branch",
+    "run-state",
+    "context-used",
+    "five-hour-limit",
+    "context-window-size",
+    "fast-mode",
+]
+
+# --- sandbox writable roots for uv ---
+# macOS / Linux: uncomment and adjust the home directory to match your system.
+# writable_roots uses absolute paths only; ~ and $HOME are NOT expanded.
+# [sandbox_workspace_write]
+# writable_roots = [
+#    "<HOME>/.cache/uv",
+#    "<HOME>/.local/share/uv",
+#    "<HOME>/.local/bin",
+# ]
+# Windows: uncomment below and comment out the macOS/Linux block above.
+# writable_roots = [
+#     "C:\\Users\\<username>\\AppData\\Local\\uv\\cache",
+#     "C:\\Users\\<username>\\AppData\\Local\\uv\\data",
+#     "C:\\Users\\<username>\\AppData\\Local\\bin",
+# ]
+

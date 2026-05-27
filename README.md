@@ -12,6 +12,141 @@ providers. The project is currently centered on these route families:
 Codex still executes local tools. The router only adapts requests and responses
 between Codex and the upstream model provider.
 
+## Install
+
+```bash
+uv sync
+```
+
+## Configure
+
+Set the upstream keys used by `router.toml`:
+
+```bash
+export DEEPSEEK_API_KEY="sk-..."
+export MIMO_API_KEY="sk-..."
+# Optional, only if you enable a responses_passthrough gateway route:
+export DEEPSEEK_GATEWAY_API_KEY="sk-..."
+```
+
+Xiaomi MiMo supports both the ordinary official Chat API and Token Plan
+clusters. The default `mimo-*` route uses one `xiaomi` upstream pointed at the
+China Token Plan base URL: `https://token-plan-cn.xiaomimimo.com/v1`. Other
+official base URLs are kept as comments in [`router.toml`](router.toml) so the
+single `xiaomi` upstream can be edited directly when a different cluster should
+own MiMo traffic.
+
+The repo includes these Codex helper files:
+
+- [`codex.config.example.toml`](codex.config.example.toml): example Codex config
+  with shared provider, plugin, UI, and sandbox settings.
+- [`llm_router.config.toml`](llm_router.config.toml): example
+  Codex profile layer for `codex -p llm_router`.
+- [`aihubmix.config.toml`](aihubmix.config.toml): example Codex
+  compatibility profile layer for direct `codex -p aihubmix` use.
+- [`llm_router.json`](llm_router.json): static model catalog for the
+  `llm_router` profile.
+- [`aihubmix.json`](aihubmix.json): static model catalog for the direct
+  `aihubmix` compatibility profile.
+
+Install the `llm_router` profile layer and catalog as symlinks. This is a
+one-time operation; later edits in this repo are picked up through the links.
+
+```bash
+mkdir -p ~/.codex
+ln -sf "$PWD/llm_router.config.toml" ~/.codex/llm_router.config.toml
+ln -sf "$PWD/llm_router.json" ~/.codex/llm_router.json
+```
+
+On Windows, use PowerShell symbolic links instead. This may require Developer
+Mode or an elevated terminal:
+
+```powershell
+$codexHome = Join-Path $HOME ".codex"
+New-Item -ItemType Directory -Force -Path $codexHome
+New-Item -ItemType SymbolicLink -Force -Path (Join-Path $codexHome "llm_router.config.toml") -Target (Join-Path $PWD "llm_router.config.toml")
+New-Item -ItemType SymbolicLink -Force -Path (Join-Path $codexHome "llm_router.json") -Target (Join-Path $PWD "llm_router.json")
+```
+
+Then merge the shared settings from
+[`codex.config.example.toml`](codex.config.example.toml) into
+`~/.codex/config.toml`. The symlinked profile only says
+`model_provider = "llm_router"`; the named provider itself must exist in the
+shared config:
+
+```toml
+[model_providers.llm_router]
+name = "llm_router"
+base_url = "http://127.0.0.1:9876/v1"
+wire_api = "responses"
+requires_openai_auth = false
+```
+
+Codex 0.134.0 and later load `codex -p llm_router` by layering
+`~/.codex/llm_router.config.toml` on top of `~/.codex/config.toml`. Do not put
+`[profiles.llm_router]` in `~/.codex/config.toml`.
+
+The intended Codex usage is one `llm_router` profile:
+
+| Command | Provider | Model catalog | Default model |
+| --- | --- | --- | --- |
+| `codex -p llm_router` | Local `llm_router` provider | `~/.codex/llm_router.json` | `deepseek-v4-pro` |
+
+The shared [`codex.config.example.toml`](codex.config.example.toml) also keeps
+`[model_providers.aihubmix]` as a compatibility provider. Leaving that provider
+entry in `~/.codex/config.toml` does not route traffic to AIHubMix unless a
+profile or override selects `model_provider = "aihubmix"`. If you want the
+direct AIHubMix fallback, install its separate profile layer and catalog:
+
+```bash
+ln -sf "$PWD/aihubmix.config.toml" ~/.codex/aihubmix.config.toml
+ln -sf "$PWD/aihubmix.json" ~/.codex/aihubmix.json
+```
+
+Windows PowerShell:
+
+```powershell
+$codexHome = Join-Path $HOME ".codex"
+New-Item -ItemType Directory -Force -Path $codexHome
+New-Item -ItemType SymbolicLink -Force -Path (Join-Path $codexHome "aihubmix.config.toml") -Target (Join-Path $PWD "aihubmix.config.toml")
+New-Item -ItemType SymbolicLink -Force -Path (Join-Path $codexHome "aihubmix.json") -Target (Join-Path $PWD "aihubmix.json")
+```
+
+`model_catalog_json` is a file path in Codex, not an inline TOML catalog. Keep
+the catalog JSON in a separate file such as `~/.codex/aihubmix.json`.
+
+MiMo is not a separate Codex profile. Use the same `llm_router` profile and
+select a `mimo-*` model from the `llm_router` model catalog; the router then
+matches that model to the Xiaomi route in [`router.toml`](router.toml).
+
+`env_key` in the Codex example is only a Codex-side placeholder for now. Real
+upstream keys are read by `llm-router` according to [`router.toml`](router.toml),
+for example `DEEPSEEK_API_KEY` for DeepSeek.
+
+## Run
+
+Start the router:
+
+```bash
+uv run llm-router serve
+```
+
+With debug logs:
+
+```bash
+uv run llm-router serve --debug
+```
+
+Debug logs are written to `llm_router.jsonl` as JSONL. `--debug` also enables
+Flask's development reloader, so normal source edits restart the local router
+process automatically while you are diagnosing or iterating.
+
+Launch Codex through the router profile:
+
+```bash
+codex -p llm_router
+```
+
 ## Supported Routes
 
 The default route config is in [`router.toml`](router.toml).
@@ -125,86 +260,6 @@ flowchart TD
 
     UP -.->|provider continuation failure| ERR[Client-visible provider error<br/>no fallback to local Chat emulation]
     R -.->|official DeepSeek API matched| CHAT[Do not passthrough<br/>use official DeepSeek Chat route]
-```
-
-## Install
-
-```bash
-uv sync
-```
-
-## Configure
-
-Set the upstream keys used by `router.toml`:
-
-```bash
-export DEEPSEEK_API_KEY="sk-..."
-export MIMO_API_KEY="sk-..."
-# Optional, only if you enable a responses_passthrough gateway route:
-export DEEPSEEK_GATEWAY_API_KEY="sk-..."
-```
-
-Xiaomi MiMo supports both the ordinary official Chat API and Token Plan
-clusters. The default `mimo-*` route uses one `xiaomi` upstream pointed at the
-China Token Plan base URL: `https://token-plan-cn.xiaomimimo.com/v1`. Other
-official base URLs are kept as comments in [`router.toml`](router.toml) so the
-single `xiaomi` upstream can be edited directly when a different cluster should
-own MiMo traffic.
-
-The repo includes these Codex helper files:
-
-- [`codex.config.example.toml`](codex.config.example.toml): example Codex config
-  with the `llm_router` provider/profile.
-- [`llm_router.json`](llm_router.json): static model catalog for the
-  `llm_router` profile.
-
-Install the static catalog:
-
-```bash
-mkdir -p ~/.codex
-cp llm_router.json ~/.codex/llm_router.json
-```
-
-Then merge the relevant provider/profile settings from
-[`codex.config.example.toml`](codex.config.example.toml) into
-`~/.codex/config.toml`.
-
-The intended Codex usage is one `llm_router` profile:
-
-| Command | Provider | Model catalog | Default model |
-| --- | --- | --- | --- |
-| `codex -p llm_router` | Local `llm_router` provider | `~/.codex/llm_router.json` | `deepseek-v4-pro` |
-
-MiMo is not a separate Codex profile. Use the same `llm_router` profile and
-select a `mimo-*` model from the `llm_router` model catalog; the router then
-matches that model to the Xiaomi route in [`router.toml`](router.toml).
-
-`env_key` in the Codex example is only a Codex-side placeholder for now. Real
-upstream keys are read by `llm-router` according to [`router.toml`](router.toml),
-for example `DEEPSEEK_API_KEY` for DeepSeek.
-
-## Run
-
-Start the router:
-
-```bash
-uv run llm-router serve
-```
-
-With debug logs:
-
-```bash
-uv run llm-router serve --debug
-```
-
-Debug logs are written to `llm_router.jsonl` as JSONL. `--debug` also enables
-Flask's development reloader, so normal source edits restart the local router
-process automatically while you are diagnosing or iterating.
-
-Launch Codex through the router profile:
-
-```bash
-codex -p llm_router
 ```
 
 ## DeepSeek Adapter

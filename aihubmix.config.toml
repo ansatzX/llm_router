@@ -1,0 +1,6 @@
+model_provider = "aihubmix"
+model = "gpt-5.5"
+model_catalog_json = "~/.codex/aihubmix.json"
+model_reasoning_effort = "high"
+approvals_reviewer = "user"
+personality = "pragmatic"

@@ -170,3 +170,4 @@ cython_debug/
 .state-machine/
 .scripts/
 .ruff_cache
+*.md
