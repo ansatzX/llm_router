@@ -69,3 +69,30 @@ def test_ensure_codex_helper_files_does_not_overwrite_existing_files(tmp_path):
 
     assert "llm_router.config.toml" not in [path.name for path in copied]
     assert existing.read_text() == "user edited\n"
+
+
+def test_clear_force_removes_corrupt_store_without_sessions(
+    monkeypatch,
+    tmp_path,
+    capsys,
+):
+    """Forced clear should delete corrupt artifacts even when no sessions load."""
+    cfg = SimpleNamespace(
+        session_ttl_seconds=3600,
+        server_host="127.0.0.1",
+        server_port=0,
+        upstreams={},
+        routes=[],
+    )
+    store_path = tmp_path / "sessions.json"
+    store_path.write_text("{not valid json", encoding="utf-8")
+    (tmp_path / "sessions.json.leftover.tmp").write_text("tmp", encoding="utf-8")
+
+    monkeypatch.setenv("LLM_ROUTER_SESSION_STORE", str(store_path))
+    monkeypatch.setattr(cli, "_load_config", lambda args: cfg)
+
+    cli.cmd_clear(SimpleNamespace(config=None, force=True))
+
+    output = capsys.readouterr().out
+    assert "Session files cleared" in output
+    assert not list(tmp_path.glob("sessions.json*"))

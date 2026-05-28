@@ -93,6 +93,12 @@ class XiaomiChatAdapter(ChatCompletionAdapterBase):
         ]
         has_image = any(part.get("type") == "image_url" for part in parts)
         if has_image:
+            has_text = any(
+                part.get("type") == "text" and part.get("text")
+                for part in parts
+            )
+            if not has_text:
+                parts.append({"type": "text", "text": "Attached image."})
             return parts
         return "\n".join(
             str(part.get("text", ""))

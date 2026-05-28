@@ -69,6 +69,16 @@ def ensure_codex_helper_files(
     return copied
 
 
+def _print_session_load_warning(stats):
+    load_error = stats.get("load_error")
+    if not load_error:
+        return
+    print(f"  WARNING: Session store could not be loaded: {load_error}")
+    backup_path = stats.get("load_backup_path")
+    if backup_path:
+        print(f"  Preserved unreadable session file at: {backup_path}")
+
+
 def cmd_serve(args):
     """Start the router server."""
     _load_dotenv()
@@ -94,6 +104,7 @@ def cmd_serve(args):
     print(f"  Sessions: {len(server_mod._sessions)} loaded from disk")
     if copied_codex_files:
         print(f"  Codex helper files installed: {len(copied_codex_files)}")
+    _print_session_load_warning(server_mod._sessions.stats())
 
     from llm_router.server import app
     app.run(
@@ -113,7 +124,8 @@ def cmd_clear(args):
     store = SessionStore(ttl_seconds=cfg.session_ttl_seconds)
     stats = store.stats()
 
-    if stats["session_count"] == 0:
+    if stats["session_count"] == 0 and stats["clear_file_count"] == 0:
+        _print_session_load_warning(stats)
         print("No sessions to clear.")
         return
 
@@ -124,9 +136,12 @@ def cmd_clear(args):
     print(f"  Total items: {stats['total_items']}")
     print(f"  Stored at:   {stats['store_path']}")
     print(f"  Disk size:   {stats['store_size_bytes']:,} bytes")
+    print(f"  Store files: {stats['clear_file_count']}")
+    print(f"  File bytes:  {stats['clear_file_size_bytes']:,} bytes")
+    _print_session_load_warning(stats)
     print()
-    print("  This means the LLM will NOT remember any previous")
-    print("  conversation context. All accumulated state will be lost.")
+    print("  This removes persisted conversation state plus")
+    print("  leftover corrupt or temporary session-store files.")
     print()
     print("  This action CANNOT be undone.")
     print("=" * 60)
@@ -139,7 +154,7 @@ def cmd_clear(args):
             return
 
     count = store.clear_all()
-    print(f"\n  Deleted {count} sessions. History cleared.")
+    print(f"\n  Deleted {count} sessions. Session files cleared.")
 
 
 def cmd_status(args):
@@ -157,6 +172,7 @@ def cmd_status(args):
     print(f"  Items:     {stats['total_items']}")
     print(f"  Disk size: {stats['store_size_bytes']:,} bytes")
     print(f"  TTL:       {cfg.session_ttl_seconds}s")
+    _print_session_load_warning(stats)
 
 
 def main() -> None:

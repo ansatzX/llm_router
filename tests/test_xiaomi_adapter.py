@@ -207,6 +207,41 @@ def test_xiaomi_preserves_structured_tool_output_images():
     ]
 
 
+def test_xiaomi_adds_text_part_for_image_only_content():
+    adapter = XiaomiChatAdapter()
+
+    messages = adapter.flatten_response_items(
+        [
+            {
+                "type": "function_call_output",
+                "call_id": "call_image",
+                "output": [
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": "data:image/png;base64,abc",
+                        },
+                    },
+                ],
+            },
+        ],
+    )
+
+    assert messages == [
+        {
+            "role": "tool",
+            "tool_call_id": "call_image",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": "data:image/png;base64,abc"},
+                },
+                {"type": "text", "text": "Attached image."},
+            ],
+        },
+    ]
+
+
 def test_xiaomi_forwards_supported_web_search_tool():
     adapter = XiaomiChatAdapter()
 

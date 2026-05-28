@@ -56,6 +56,84 @@ def test_session_mutations_are_persisted(tmp_path):
     assert same_session.items == session.items
 
 
+def test_malformed_json_store_is_preserved_and_ignored(tmp_path):
+    """Malformed persisted state should not prevent router startup."""
+    store_path = tmp_path / "sessions.json"
+    store_path.write_text("{not valid json", encoding="utf-8")
+
+    store = SessionStore(store_path=store_path, ttl_seconds=3600)
+    stats = store.stats()
+
+    assert len(store) == 0
+    assert not store_path.exists()
+    assert stats["load_error"].startswith("JSONDecodeError:")
+    backup_path = stats["load_backup_path"]
+    assert backup_path is not None
+    assert store.load_backup_path is not None
+    assert str(store.load_backup_path) == backup_path
+    assert store.load_backup_path.read_text(encoding="utf-8") == "{not valid json"
+
+    session = store.create("test-model")
+    assert store.get(session.response_id) is session
+    assert store_path.exists()
+
+
+def test_non_utf8_store_is_preserved_and_ignored(tmp_path):
+    """Invalid UTF-8 in persisted state should not crash SessionStore construction."""
+    store_path = tmp_path / "sessions.json"
+    corrupt_bytes = b'{"sessions": {"resp_bad": "\xf0"}}'
+    store_path.write_bytes(corrupt_bytes)
+
+    store = SessionStore(store_path=store_path, ttl_seconds=3600)
+    stats = store.stats()
+
+    assert len(store) == 0
+    assert stats["load_error"].startswith("UnicodeDecodeError:")
+    backup_path = stats["load_backup_path"]
+    assert backup_path is not None
+    assert store.load_backup_path is not None
+    assert str(store.load_backup_path) == backup_path
+    assert store.load_backup_path.read_bytes() == corrupt_bytes
+
+
+def test_structurally_corrupt_store_does_not_partially_load_sessions(tmp_path):
+    """A bad later session should not leave earlier sessions live in memory."""
+    store_path = tmp_path / "sessions.json"
+    original = SessionStore(store_path=store_path, ttl_seconds=3600)
+    session = original.create("test-model")
+
+    data = json.loads(store_path.read_text(encoding="utf-8"))
+    data["sessions"]["resp_bad"] = {"model": "broken"}
+    store_path.write_text(json.dumps(data), encoding="utf-8")
+
+    store = SessionStore(store_path=store_path, ttl_seconds=3600)
+    stats = store.stats()
+
+    assert len(store) == 0
+    assert store.get(session.response_id) is None
+    assert not store_path.exists()
+    assert stats["load_error"].startswith("KeyError:")
+    assert store.load_backup_path is not None
+
+
+def test_clear_all_removes_corrupt_and_temporary_session_files(tmp_path):
+    """Clear should remove stale session artifacts, not only live JSON state."""
+    store_path = tmp_path / "sessions.json"
+    store_path.write_text("{not valid json", encoding="utf-8")
+    tmp_file = tmp_path / "sessions.json.abc.tmp"
+    old_tmp_file = tmp_path / "sessions.json.tmp"
+    old_corrupt_file = tmp_path / "sessions.json.corrupt-old"
+    tmp_file.write_text("tmp", encoding="utf-8")
+    old_tmp_file.write_text("tmp", encoding="utf-8")
+    old_corrupt_file.write_text("old", encoding="utf-8")
+
+    store = SessionStore(store_path=store_path, ttl_seconds=3600)
+
+    assert store.stats()["clear_file_count"] == 4
+    assert store.clear_all() == 0
+    assert not list(tmp_path.glob("sessions.json*"))
+
+
 def test_register_response_id_keeps_latest_response_link(tmp_path):
     """A new response ID can be used as previous_response_id on the next turn."""
     store = SessionStore(store_path=tmp_path / "sessions.json", ttl_seconds=3600)

@@ -132,6 +132,8 @@ class SessionStore:
         self.ttl_seconds = ttl_seconds
         self._lock = threading.RLock()
         self._store: OrderedDict[str, ResponsesSession] = OrderedDict()
+        self.load_error: str | None = None
+        self.load_backup_path: Path | None = None
         self._load()
 
     # ── Persistence ────────────────────────────────────────────────────
@@ -152,22 +154,79 @@ class SessionStore:
                 if fcntl is not None:
                     fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
+    def _corrupt_backup_path(self) -> Path:
+        timestamp = time.strftime("%Y%m%d%H%M%S", time.localtime())
+        base_name = f"{self.store_path.name}.corrupt-{timestamp}"
+        candidate = self.store_path.with_name(base_name)
+        suffix = 1
+        while candidate.exists():
+            candidate = self.store_path.with_name(f"{base_name}-{suffix}")
+            suffix += 1
+        return candidate
+
+    def _preserve_unreadable_store(self, exc: Exception) -> None:
+        self._store.clear()
+        self.load_error = f"{exc.__class__.__name__}: {exc}"
+        try:
+            backup_path = self._corrupt_backup_path()
+            os.replace(self.store_path, backup_path)
+            self.load_backup_path = backup_path
+        except OSError as backup_exc:
+            self.load_error = f"{self.load_error}; backup failed: {backup_exc}"
+
+    def _clear_file_candidates(self) -> list[Path]:
+        if not self.store_path.parent.exists():
+            return []
+
+        candidates = [
+            self.store_path,
+            self.store_path.with_name(f"{self.store_path.name}.tmp"),
+        ]
+        candidates.extend(
+            self.store_path.parent.glob(f"{self.store_path.name}.corrupt-*"),
+        )
+        candidates.extend(
+            self.store_path.parent.glob(f"{self.store_path.name}.*.tmp"),
+        )
+
+        unique_candidates = []
+        seen = set()
+        for candidate in candidates:
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            if candidate.exists() and (candidate.is_file() or candidate.is_symlink()):
+                unique_candidates.append(candidate)
+        return sorted(unique_candidates)
+
     def _load(self):
         with self._lock:
             if not self.store_path.exists():
                 return
             try:
-                with open(self.store_path) as f:
-                    data = json.load(f)
-                loaded = 0
-                for rid, raw in data.get("sessions", {}).items():
-                    session = ResponsesSession.from_dict(raw)
-                    self._store[rid] = session
-                    loaded += 1
-                if loaded:
-                    pass  # Silent load
-            except (json.JSONDecodeError, OSError):
-                pass
+                with self._file_lock():
+                    if not self.store_path.exists():
+                        return
+                    try:
+                        with open(self.store_path, encoding="utf-8") as f:
+                            data = json.load(f)
+                        loaded_store: OrderedDict[str, ResponsesSession] = OrderedDict()
+                        for rid, raw in data.get("sessions", {}).items():
+                            session = ResponsesSession.from_dict(raw)
+                            loaded_store[rid] = session
+                        if loaded_store:
+                            pass  # Silent load
+                        self._store = loaded_store
+                    except (
+                        json.JSONDecodeError,
+                        UnicodeDecodeError,
+                        AttributeError,
+                        KeyError,
+                        TypeError,
+                    ) as exc:
+                        self._preserve_unreadable_store(exc)
+            except OSError as exc:
+                self.load_error = f"{exc.__class__.__name__}: {exc}"
 
     def _save(self):
         with self._lock, self._file_lock():
@@ -350,20 +409,31 @@ class SessionStore:
         with self._lock, self._file_lock():
             count = len(self._store)
             self._store.clear()
-            if self.store_path.exists():
-                self.store_path.unlink()
+            for candidate in self._clear_file_candidates():
+                candidate.unlink(missing_ok=True)
+            self.load_error = None
+            self.load_backup_path = None
             return count
 
     def stats(self) -> dict[str, Any]:
         """Diagnostic info: count, total items, disk path, etc."""
         with self._lock:
             total_items = sum(s.item_count() for s in self._store.values())
+            clear_files = self._clear_file_candidates()
             return {
                 "session_count": len(self._store),
                 "total_items": total_items,
                 "store_path": str(self.store_path),
                 "store_size_bytes": (
                     self.store_path.stat().st_size if self.store_path.exists() else 0
+                ),
+                "clear_file_count": len(clear_files),
+                "clear_file_size_bytes": sum(
+                    path.stat().st_size for path in clear_files if path.exists()
+                ),
+                "load_error": self.load_error,
+                "load_backup_path": (
+                    str(self.load_backup_path) if self.load_backup_path else None
                 ),
             }
 

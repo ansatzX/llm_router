@@ -393,8 +393,13 @@ Skip confirmation:
 uv run llm-router clear -f
 ```
 
-Clearing sessions is useful after adapter changes or when a conversation contains
-old incompatible tool-call history.
+Clearing sessions is useful after adapter changes, when a conversation contains
+old incompatible tool-call history, or when leftover corrupt or temporary session
+store files need to be removed.
+
+If the persisted session file is unreadable, startup preserves it next to the
+configured path with a `.corrupt-<timestamp>` suffix and continues with an empty
+session store.
 
 ## Streaming Status
 
