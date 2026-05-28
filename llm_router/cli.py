@@ -9,16 +9,7 @@ Commands:
 
 import argparse
 import os
-import shutil
 import sys
-from pathlib import Path
-
-CODEX_HELPER_FILES = (
-    "llm_router.config.toml",
-    "llm_router.json",
-    "aihubmix.config.toml",
-    "aihubmix.json",
-)
 
 
 def _load_dotenv():
@@ -36,39 +27,6 @@ def _load_config(args):
     return RouterConfig.load_or_find(config_path)
 
 
-def _codex_home() -> Path:
-    configured = os.environ.get("CODEX_HOME")
-    if configured:
-        return Path(configured).expanduser()
-    return Path.home() / ".codex"
-
-
-def _repo_root() -> Path:
-    return Path(__file__).resolve().parent.parent
-
-
-def ensure_codex_helper_files(
-    *,
-    codex_home: Path | None = None,
-    source_root: Path | None = None,
-) -> list[Path]:
-    """Copy bundled Codex helper files into CODEX_HOME only when missing."""
-    target_dir = codex_home or _codex_home()
-    source_dir = source_root or _repo_root()
-    copied: list[Path] = []
-
-    for filename in CODEX_HELPER_FILES:
-        source = source_dir / filename
-        target = target_dir / filename
-        if target.exists() or target.is_symlink() or not source.exists():
-            continue
-        target_dir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(source, target)
-        copied.append(target)
-
-    return copied
-
-
 def _print_session_load_warning(stats):
     load_error = stats.get("load_error")
     if not load_error:
@@ -83,11 +41,12 @@ def cmd_serve(args):
     """Start the router server."""
     _load_dotenv()
 
+    from llm_router.codex_presets import sync_codex_presets
     from llm_router.debug_log import set_debug_mode
     from llm_router.session_store import SessionStore
 
+    synced_presets = sync_codex_presets()
     cfg = _load_config(args)
-    copied_codex_files = ensure_codex_helper_files()
 
     # Wire globals
     import llm_router.server as server_mod
@@ -101,9 +60,9 @@ def cmd_serve(args):
     print(f"LLM Router starting on {cfg.server_host}:{cfg.server_port}")
     print(f"  Upstreams: {list(cfg.upstreams.keys())}")
     print(f"  Routes: {len(cfg.routes)} patterns")
+    if synced_presets:
+        print(f"  Codex presets: {len(synced_presets)} synced to {synced_presets[0].parent}")
     print(f"  Sessions: {len(server_mod._sessions)} loaded from disk")
-    if copied_codex_files:
-        print(f"  Codex helper files installed: {len(copied_codex_files)}")
     _print_session_load_warning(server_mod._sessions.stats())
 
     from llm_router.server import app

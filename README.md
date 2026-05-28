@@ -49,17 +49,10 @@ The repo includes these Codex helper files:
 - [`aihubmix.json`](aihubmix.json): static model catalog for the direct
   `aihubmix` compatibility profile.
 
-When `llm-router serve` starts, it checks `CODEX_HOME` or `~/.codex` and copies
-missing Codex helper files from this repo:
-
-- `llm_router.config.toml`
-- `llm_router.json`
-- `aihubmix.config.toml`
-- `aihubmix.json`
-
-Existing files and symlinks are left untouched, so local edits are not
-overwritten. To refresh a helper file from the repo, remove the target file from
-`~/.codex` and restart `llm-router serve`.
+When `llm-router serve` starts, it copies all root-level `*.config.toml` profile
+layers and `*.json` model catalogs from this repo into `${CODEX_HOME:-~/.codex}`
+and overwrites existing files with the same names. This keeps macOS, Linux, and
+Windows setup the same and avoids platform-specific symlink requirements.
 
 Then merge the shared settings from
 [`codex.config.example.toml`](codex.config.example.toml) into
@@ -88,8 +81,9 @@ The intended Codex usage is one `llm_router` profile:
 The shared [`codex.config.example.toml`](codex.config.example.toml) also keeps
 `[model_providers.aihubmix]` as a compatibility provider. Leaving that provider
 entry in `~/.codex/config.toml` does not route traffic to AIHubMix unless a
-profile or override selects `model_provider = "aihubmix"`. The direct AIHubMix
-profile layer and catalog are installed by the same startup copy check.
+profile or override selects `model_provider = "aihubmix"`. The `aihubmix`
+profile layer and catalog are copied by router startup together with the
+`llm_router` presets.
 
 `model_catalog_json` is a file path in Codex, not an inline TOML catalog. Keep
 the catalog JSON in a separate file such as `~/.codex/aihubmix.json`.
