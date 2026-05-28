@@ -49,24 +49,17 @@ The repo includes these Codex helper files:
 - [`aihubmix.json`](aihubmix.json): static model catalog for the direct
   `aihubmix` compatibility profile.
 
-Install the `llm_router` profile layer and catalog as symlinks. This is a
-one-time operation; later edits in this repo are picked up through the links.
+When `llm-router serve` starts, it checks `CODEX_HOME` or `~/.codex` and copies
+missing Codex helper files from this repo:
 
-```bash
-mkdir -p ~/.codex
-ln -sf "$PWD/llm_router.config.toml" ~/.codex/llm_router.config.toml
-ln -sf "$PWD/llm_router.json" ~/.codex/llm_router.json
-```
+- `llm_router.config.toml`
+- `llm_router.json`
+- `aihubmix.config.toml`
+- `aihubmix.json`
 
-On Windows, use PowerShell symbolic links instead. This may require Developer
-Mode or an elevated terminal:
-
-```powershell
-$codexHome = Join-Path $HOME ".codex"
-New-Item -ItemType Directory -Force -Path $codexHome
-New-Item -ItemType SymbolicLink -Force -Path (Join-Path $codexHome "llm_router.config.toml") -Target (Join-Path $PWD "llm_router.config.toml")
-New-Item -ItemType SymbolicLink -Force -Path (Join-Path $codexHome "llm_router.json") -Target (Join-Path $PWD "llm_router.json")
-```
+Existing files and symlinks are left untouched, so local edits are not
+overwritten. To refresh a helper file from the repo, remove the target file from
+`~/.codex` and restart `llm-router serve`.
 
 Then merge the shared settings from
 [`codex.config.example.toml`](codex.config.example.toml) into
@@ -95,22 +88,8 @@ The intended Codex usage is one `llm_router` profile:
 The shared [`codex.config.example.toml`](codex.config.example.toml) also keeps
 `[model_providers.aihubmix]` as a compatibility provider. Leaving that provider
 entry in `~/.codex/config.toml` does not route traffic to AIHubMix unless a
-profile or override selects `model_provider = "aihubmix"`. If you want the
-direct AIHubMix fallback, install its separate profile layer and catalog:
-
-```bash
-ln -sf "$PWD/aihubmix.config.toml" ~/.codex/aihubmix.config.toml
-ln -sf "$PWD/aihubmix.json" ~/.codex/aihubmix.json
-```
-
-Windows PowerShell:
-
-```powershell
-$codexHome = Join-Path $HOME ".codex"
-New-Item -ItemType Directory -Force -Path $codexHome
-New-Item -ItemType SymbolicLink -Force -Path (Join-Path $codexHome "aihubmix.config.toml") -Target (Join-Path $PWD "aihubmix.config.toml")
-New-Item -ItemType SymbolicLink -Force -Path (Join-Path $codexHome "aihubmix.json") -Target (Join-Path $PWD "aihubmix.json")
-```
+profile or override selects `model_provider = "aihubmix"`. The direct AIHubMix
+profile layer and catalog are installed by the same startup copy check.
 
 `model_catalog_json` is a file path in Codex, not an inline TOML catalog. Keep
 the catalog JSON in a separate file such as `~/.codex/aihubmix.json`.
