@@ -9,6 +9,7 @@ Commands:
 
 import argparse
 import os
+import socket
 import sys
 
 
@@ -37,16 +38,58 @@ def _print_session_load_warning(stats):
         print(f"  Preserved unreadable session file at: {backup_path}")
 
 
+def _parse_port(value: str) -> int:
+    try:
+        port = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("port must be an integer") from exc
+    if not 0 <= port <= 65535:
+        raise argparse.ArgumentTypeError("port must be between 0 and 65535")
+    return port
+
+
+def _port_available(host: str, port: int) -> bool:
+    if port == 0:
+        return True
+    try:
+        with socket.create_server((host, port), reuse_port=False):
+            return True
+    except OSError:
+        return False
+
+
+def _exit_port_in_use(host: str, port: int) -> None:
+    print(
+        f"Port {port} on {host} is already in use. "
+        "Please start llm-router with a temporary port, for example "
+        f"`llm-router serve --port {port + 1}`, and update the matching "
+        "`base_url` port in `~/.codex/config.toml`.",
+        file=sys.stderr,
+    )
+    raise SystemExit(2)
+
+
+def _is_werkzeug_reloader_child() -> bool:
+    return os.environ.get("WERKZEUG_RUN_MAIN") == "true"
+
+
 def cmd_serve(args):
     """Start the router server."""
     _load_dotenv()
 
-    from llm_router.codex_presets import sync_codex_presets
     from llm_router.debug_log import set_debug_mode
     from llm_router.session_store import SessionStore
 
-    synced_presets = sync_codex_presets()
     cfg = _load_config(args)
+    if args.port is not None:
+        cfg.server_port = args.port
+    is_reloader_child = _is_werkzeug_reloader_child()
+    if not is_reloader_child and not _port_available(cfg.server_host, cfg.server_port):
+        _exit_port_in_use(cfg.server_host, cfg.server_port)
+
+    from llm_router.codex_presets import sync_codex_presets
+
+    synced_presets = [] if is_reloader_child else sync_codex_presets()
 
     # Wire globals
     import llm_router.server as server_mod
@@ -146,6 +189,8 @@ def main() -> None:
 
     # serve
     p_serve = sub.add_parser("serve", help="Start the router server")
+    p_serve.add_argument("--port", type=_parse_port, default=None,
+                         help="Override the server port for this run")
     p_serve.add_argument("--debug", action="store_true",
                          help="Enable debug logging")
     p_serve.set_defaults(func=cmd_serve)

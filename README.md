@@ -56,7 +56,7 @@ Windows setup the same and avoids platform-specific symlink requirements.
 
 Then merge the shared settings from
 [`codex.config.example.toml`](codex.config.example.toml) into
-`~/.codex/config.toml`. The symlinked profile only says
+`~/.codex/config.toml`. The synced profile only says
 `model_provider = "llm_router"`; the named provider itself must exist in the
 shared config:
 
@@ -109,6 +109,15 @@ With debug logs:
 ```bash
 uv run llm-router serve --debug
 ```
+
+If the configured port is already in use, start the router on a temporary port:
+
+```bash
+uv run llm-router serve --port 9877
+```
+
+Then update the matching `base_url` port in `~/.codex/config.toml`, for example
+`http://127.0.0.1:9877/v1`.
 
 Debug logs are written to `llm_router.jsonl` as JSONL. `--debug` also enables
 Flask's development reloader, so normal source edits restart the local router
