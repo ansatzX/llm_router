@@ -127,11 +127,12 @@ _XIAOMI_BUILTIN_TOOL_LIMIT_MESSAGE = (
 _XIAOMI_BUILTIN_TOOL_LIMIT_SUMMARY = "正在多次搜索，提醒用户"
 
 
-def create_app(config_path: str | None = None) -> Flask:
+def create_app(config_path: str | None = None, enable_dashboard: bool = False) -> Flask:
     """Create and configure the Flask application.
 
     Args:
         config_path: Path to router.toml. Searches default locations if None.
+        enable_dashboard: Register the /dashboard web UI blueprint.
     """
     global _config, _sessions
 
@@ -139,6 +140,10 @@ def create_app(config_path: str | None = None) -> Flask:
 
     _sessions = SessionStore(ttl_seconds=_config.session_ttl_seconds)
     _deepseek_adapter.reset()
+
+    if enable_dashboard:
+        from llm_router.windows.dashboard import dashboard_bp
+        app.register_blueprint(dashboard_bp)
 
     logger.info("LLM Router loaded: %d upstreams, %d routes",
                 len(_config.upstreams), len(_config.routes))

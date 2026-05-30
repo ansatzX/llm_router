@@ -60,6 +60,7 @@ class RouterConfig:
 
     upstreams: dict[str, UpstreamConfig] = field(default_factory=dict)
     routes: list[RouteConfig] = field(default_factory=list)
+    windows: dict = field(default_factory=dict)
 
     @classmethod
     def from_toml(cls, path: str | Path) -> RouterConfig:
@@ -105,6 +106,9 @@ class RouterConfig:
             "upstream_model",
             cfg.default_upstream_model,
         )
+
+        # [windows] -- optional, read as raw dict
+        cfg.windows = data.get("windows", {})
 
         cfg._validate()
         return cfg
