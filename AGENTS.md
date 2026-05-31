@@ -18,7 +18,10 @@ satisfied.
    provide a local Codex source directory, then the developer must verify it is
    up to date with `git pull`; if no local copy exists, clone Codex locally
    before making changes. Router behavior must be checked against that Codex
-   source and the relevant guides/reference files in `docs/`.
+   source and the relevant guides/reference files in `docs/`. Run
+   `codex features list` to classify referenced Codex source features as
+   stable, in-development, or experimental, and use that classification when
+   judging how robust a source-code inference is.
 2. Provider API documentation must be available for the provider being changed,
    and real behavior must be verified through logs, live requests, or focused
    regression tests. For provider work, do not rely on OpenAI compatibility by

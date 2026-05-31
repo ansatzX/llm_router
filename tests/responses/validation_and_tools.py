@@ -1,6 +1,7 @@
 """Responses endpoint regression tests."""
 
 import json
+from types import SimpleNamespace
 
 import llm_router.server as server_mod
 from llm_router.config import UpstreamConfig
@@ -194,6 +195,185 @@ def test_responses_deepseek_filters_hosted_web_search_tool_before_upstream(
     )
 
     assert response.status_code == 200
+    payload = mock_make_request.call_args.args[0]
+    assert "tools" not in payload
+
+
+def test_responses_deepseek_hosted_web_search_injects_internal_tool(
+    tmp_path,
+    monkeypatch,
+):
+    """Official DeepSeek should expose hosted web_search as an internal Chat tool."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    mock_make_request.side_effect = [
+        {
+            "created": 123,
+            "choices": [
+                {
+                    "message": {
+                        "content": None,
+                        "tool_calls": [
+                            {
+                                "id": "call_ws",
+                                "type": "function",
+                                "function": {
+                                    "name": "__router_deepseek_web_search",
+                                    "arguments": '{"query":"Search current docs"}',
+                                },
+                            },
+                        ],
+                    },
+                    "finish_reason": "tool_calls",
+                }
+            ],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
+        },
+        {
+            "created": 124,
+            "choices": [
+                {
+                    "message": {
+                        "content": "Found the latest docs.",
+                    },
+                    "finish_reason": "stop",
+                }
+            ],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11},
+        },
+    ]
+    monkeypatch.setattr(
+        "llm_router.deepseek.anthropic_web_search.DeepSeekAnthropicWebSearchExecutor.execute",
+        lambda self, queries, max_tokens=None, temperature=None, top_p=None: SimpleNamespace(
+            queries=queries,
+            searches=[
+                {
+                    "query": queries[0] if queries else "",
+                    "results": [
+                        {
+                            "type": "web_search_result",
+                            "url": "https://example.com/docs",
+                            "title": "Docs",
+                        }
+                    ],
+                    "text": "Docs summary",
+                }
+            ],
+            text="Docs summary",
+            usage={
+                "input_tokens": 2,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 3,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "server_tool_use": {"web_search_requests": 1},
+                "total_tokens": 5,
+            },
+            raw_response={},
+            raw_responses=[],
+            content_blocks=[],
+        ),
+    )
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": "Search current docs",
+            "tools": [{"type": "web_search", "external_web_access": True}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert mock_make_request.call_count == 2
+    payload = mock_make_request.call_args_list[0].args[0]
+    assert payload["model"] == "test-model"
+    assert payload["messages"][0] == {"role": "user", "content": "Search current docs"}
+    assert payload["tools"] == [
+        {
+            "type": "function",
+            "function": {
+                "name": "__router_deepseek_web_search",
+                "description": (
+                    "Search the live web when current or external information is needed. "
+                    "Call this tool only when the user request requires web results."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Focused web search query.",
+                        },
+                        "queries": {
+                            "type": "array",
+                            "items": {
+                                "type": "string",
+                                "description": "Focused web search query.",
+                            },
+                            "description": "Focused web search queries.",
+                        },
+                    },
+                    "additionalProperties": False,
+                },
+            },
+        }
+    ]
+    body = response.get_json()
+    assert [item["type"] for item in body["output"]] == ["web_search_call", "message"]
+    assert body["output"][0]["id"] == "call_ws"
+    assert body["output"][0]["action"] == {"type": "search", "query": "Search current docs"}
+    assert body["output"][1]["content"][0]["text"] == "Found the latest docs."
+    assert body["output_text"] == "Found the latest docs."
+
+
+def test_responses_deepseek_mcp_first_web_search_stays_on_chat_path(
+    tmp_path,
+    monkeypatch,
+):
+    """DeepSeek mcp_first routes should not receive the new internal search tool."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    mock_make_request.return_value = {
+        "created": 123,
+        "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+    server_mod._config.default_model_type = "mcp_first"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": "Search current docs",
+            "tools": [{"type": "web_search", "external_web_access": True}],
+        },
+    )
+
+    assert response.status_code == 200
+    mock_make_request.assert_called_once()
     payload = mock_make_request.call_args.args[0]
     assert "tools" not in payload
 

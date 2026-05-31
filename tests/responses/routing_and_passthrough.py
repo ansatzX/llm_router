@@ -62,6 +62,39 @@ def test_responses_chat_route_forwards_codex_tools_as_chat_tools(tmp_path, monke
     ]
     assert payload["tool_choice"] == "auto"
 
+
+def test_responses_deepseek_without_web_search_still_uses_chat_adapter(
+    tmp_path,
+    monkeypatch,
+):
+    """Ordinary DeepSeek turns must remain on the Chat adapter path."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "ok"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={"model": "test-model", "input": "hello"},
+    )
+
+    assert response.status_code == 200
+    assert mock_make_request.call_count == 1
+    payload, base_url = mock_make_request.call_args.args[:2]
+    assert payload["messages"] == [{"role": "user", "content": "hello"}]
+    assert base_url == "https://api.deepseek.com"
+
+
 def test_responses_deepseek_route_filters_responses_metadata(
     tmp_path,
     monkeypatch,

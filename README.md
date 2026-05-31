@@ -145,6 +145,12 @@ can be configured explicitly with `type = "responses_passthrough"`. Official
 DeepSeek at `https://api.deepseek.com` should stay on the `responses_chat`
 route because this router targets DeepSeek's Chat API there.
 
+Future TODO: a complete DeepSeek Anthropic adapter can be considered if
+DeepSeek expands its Claude Code or Anthropic compatibility beyond hosted web
+search. It is not the primary implementation path for Codex hosted web search;
+the intended near-term path is a focused bridge from Codex `/v1/responses`
+`web_search` tools to DeepSeek's Anthropic-compatible web search endpoint.
+
 AIHubMix is configured as the named upstream `aihubmix`, not as the default
 upstream. There is no broad `gpt-*` or `claude-*` route to AIHubMix in the
 default config. If a deployment wants AIHubMix to own a native Responses route,

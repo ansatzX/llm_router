@@ -107,6 +107,143 @@ def test_responses_chat_route_resumes_pending_tool_call_state(
     assert "historical tool call omitted" not in str(second_payload["messages"])
     assert "Tool output:" not in str(second_payload["messages"])
 
+
+def test_responses_deepseek_web_search_failure_does_not_commit_session(
+    tmp_path,
+    monkeypatch,
+):
+    """Failed DeepSeek hosted search requests must not advance local state."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+
+    mock_make_request.return_value = {
+        "created": 123,
+        "choices": [
+            {
+                "message": {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_ws",
+                            "type": "function",
+                            "function": {
+                                "name": "__router_deepseek_web_search",
+                                "arguments": '{"query":"Find current docs"}',
+                            },
+                        },
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+    def failing_request(self, queries, max_tokens=None, temperature=None, top_p=None):
+        raise LLMRequestError("bridge failed", status_code=503)
+
+    monkeypatch.setattr(
+        "llm_router.deepseek.anthropic_web_search.DeepSeekAnthropicWebSearchExecutor.execute",
+        failing_request,
+    )
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": "Find current docs",
+            "tools": [{"type": "web_search", "external_web_access": True}],
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.get_json()["error"]["code"] == "provider_error"
+    assert len(server_mod._sessions) == 0
+    assert mock_make_request.call_count == 1
+
+
+def test_responses_deepseek_malformed_web_search_result_does_not_commit_session(
+    tmp_path,
+    monkeypatch,
+):
+    """Malformed hosted search payloads must fail before local session commit."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+
+    mock_make_request.return_value = {
+        "created": 123,
+        "choices": [
+            {
+                "message": {
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_ws",
+                            "type": "function",
+                            "function": {
+                                "name": "__router_deepseek_web_search",
+                                "arguments": '{"query":"Find current docs"}',
+                            },
+                        },
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+    def malformed_request(payload, llm_base_url, api_key):
+        return {
+            "stop_reason": "end_turn",
+            "content": [],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+
+    monkeypatch.setattr(
+        "llm_router.deepseek.anthropic_web_search.make_deepseek_anthropic_messages_request",
+        malformed_request,
+    )
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": "Find current docs",
+            "tools": [{"type": "web_search", "external_web_access": True}],
+        },
+    )
+
+    assert response.status_code == 502
+    assert response.get_json()["error"]["code"] == "provider_error"
+    assert len(server_mod._sessions) == 0
+    assert mock_make_request.call_count == 1
+
+
 def test_responses_accepts_codex_side_channel_between_tool_call_and_output(
     tmp_path,
     monkeypatch,

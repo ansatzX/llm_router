@@ -33,6 +33,11 @@ from llm_router.codex_recovery import (
 from llm_router.config import RouterConfig
 from llm_router.debug_log import log_debug
 from llm_router.deepseek import DeepSeekChatAdapter
+from llm_router.deepseek.anthropic_web_search import (
+    DeepSeekAnthropicSearchExecution,
+    DeepSeekAnthropicWebSearchExecutor,
+    _queries_from_internal_tool_arguments,
+)
 from llm_router.llm_client import (
     LLMRequestError,
     ResponsesPassthroughError,
@@ -125,6 +130,8 @@ _XIAOMI_BUILTIN_TOOL_LIMIT_MESSAGE = (
     "否则请基于已有搜索结果回答用户。"
 )
 _XIAOMI_BUILTIN_TOOL_LIMIT_SUMMARY = "正在多次搜索，提醒用户"
+_DEEPSEEK_WEB_SEARCH_TOOL_NAME = "__router_deepseek_web_search"
+_DEEPSEEK_INTERNAL_WEB_SEARCH_MAX_ROUNDS = 5
 
 
 def create_app(config_path: str | None = None) -> Flask:
@@ -332,6 +339,10 @@ def _supports_live_upstream_streaming(
     - no Plan-mode retry steering that requires hidden second attempts
     """
     if context.inject_mcp:
+        return False
+    if context.provider_state_key == "deepseek" and any(
+        tool.get("type") == "web_search" for tool in tools_raw
+    ):
         return False
     if context.provider_state_key == "xiaomi" and any(
         tool.get("type") == "web_search" for tool in tools_raw
@@ -1154,6 +1165,148 @@ def _split_builtin_web_search_tools(
     return web_search_tools, remaining_tools
 
 
+def _deepseek_web_search_internal_tool(
+    web_search_tool: dict[str, Any],
+) -> dict[str, Any]:
+    """Expose DeepSeek hosted web_search as a model-chosen internal function."""
+    description = (
+        "Search the live web when current or external information is needed. "
+        "Call this tool only when the user request requires web results."
+    )
+    parameters: dict[str, Any] = {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "Focused web search query.",
+            },
+            "queries": {
+                "type": "array",
+                "items": {
+                    "type": "string",
+                    "description": "Focused web search query.",
+                },
+                "description": "Focused web search queries.",
+            },
+        },
+        "additionalProperties": False,
+    }
+    for key in (
+        "search_context_size",
+        "filters",
+        "location",
+        "user_location",
+        "force_search",
+        "forced_search",
+        "max_keyword",
+        "limit",
+    ):
+        if key in web_search_tool:
+            parameters.setdefault("x-router-deepseek-web-search-defaults", {})[key] = (
+                web_search_tool[key]
+            )
+    return {
+        "type": "function",
+        "name": _DEEPSEEK_WEB_SEARCH_TOOL_NAME,
+        "description": description,
+        "parameters": parameters,
+    }
+
+
+def _replace_deepseek_web_search_with_internal_tool(
+    context: _ResponsesTurnContext,
+    tools_raw: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    if context.provider_state_key != "deepseek":
+        return None, tools_raw
+    if context.model_type != "responses_chat":
+        return None, tools_raw
+    if not _is_official_deepseek_base_url(context.base_url):
+        return None, tools_raw
+    web_search_tools, remaining_tools = _split_builtin_web_search_tools(tools_raw)
+    if not web_search_tools:
+        return None, tools_raw
+    internal_tool = _deepseek_web_search_internal_tool(web_search_tools[0])
+    return web_search_tools[0], [*remaining_tools, internal_tool]
+
+
+def _find_deepseek_web_search_calls(
+    native_tool_calls: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    calls: list[dict[str, Any]] = []
+    for tool_call in native_tool_calls:
+        function = tool_call.get("function") or {}
+        if function.get("name") != _DEEPSEEK_WEB_SEARCH_TOOL_NAME:
+            continue
+        queries = _queries_from_internal_tool_arguments(function.get("arguments", ""))
+        calls.append({
+            "id": str(tool_call.get("id") or ""),
+            "queries": queries,
+            "query": queries[0] if queries else "",
+        })
+    return calls
+
+
+def _deepseek_web_search_context_message(
+    call: dict[str, Any],
+    execution: DeepSeekAnthropicSearchExecution,
+) -> str:
+    parts = [
+        "Router web search results are available for this turn.",
+    ]
+    query = str(call.get("query") or "").strip()
+    if query:
+        parts.append(f"Query: {query}")
+    if execution.text:
+        parts.extend(["Result:", execution.text])
+    if execution.searches:
+        parts.append("Sources:")
+        for index, search in enumerate(execution.searches, start=1):
+            search_query = str(search.get("query") or "").strip()
+            if search_query:
+                parts.append(f"{index}. {search_query}")
+            search_text = search.get("text")
+            if isinstance(search_text, str) and search_text:
+                parts.append(f"   {search_text}")
+            else:
+                for result in (search.get("results") or [])[:3]:
+                    if not isinstance(result, dict):
+                        continue
+                    title = result.get("title") or result.get("url") or "source"
+                    url = result.get("url") or ""
+                    line = f"   - {title}"
+                    if url:
+                        line = f"{line}: {url}"
+                    parts.append(line)
+    return "\n".join(parts)
+
+
+def _deepseek_web_search_output_item(call: dict[str, Any]) -> dict[str, Any]:
+    query = str(call.get("query") or "").strip()
+    action: dict[str, Any]
+    if query:
+        action = {"type": "search", "query": query}
+    else:
+        queries = call.get("queries") or []
+        if isinstance(queries, list) and queries:
+            action = {
+                "type": "search",
+                "query": "\n".join(
+                    str(query).strip()
+                    for query in queries
+                    if isinstance(query, str) and str(query).strip()
+                ),
+            }
+        else:
+            action = {"type": "other"}
+    return {
+        "type": "web_search_call",
+        "id": str(call.get("id") or ""),
+        "status": "completed",
+        "action": action,
+    }
+
+
 def _xiaomi_do_web_search_tool(web_search_tool: dict[str, Any]) -> dict[str, Any]:
     """Expose Xiaomi hosted search as a model-chosen internal function."""
     description = (
@@ -1328,6 +1481,93 @@ def _run_xiaomi_builtin_web_search_safely(
             "body": exc.body,
         })
         return _BuiltinWebSearchResult(output=None, usage=empty_usage)
+
+
+def _run_deepseek_internal_tool_loop(
+    data: dict[str, Any],
+    context: _ResponsesTurnContext,
+    payload: dict[str, Any],
+    web_search_tool: dict[str, Any] | None,
+    first_result: _ResponsesProviderResult,
+) -> _ResponsesProviderResult:
+    result = first_result
+    if not web_search_tool:
+        return result
+
+    total_tool_usage = _responses_usage_from_provider({})
+    search_output_items: list[dict[str, Any]] = []
+    search_rounds = 0
+
+    while True:
+        calls = _find_deepseek_web_search_calls(
+            result.response_message.get("tool_calls") or [],
+        )
+        if not calls:
+            break
+        if search_rounds >= _DEEPSEEK_INTERNAL_WEB_SEARCH_MAX_ROUNDS:
+            log_debug("DEEPSEEK_INTERNAL_TOOL_LOOP_STOPPED", {
+                "reason": "max_rounds_exhausted",
+                "max_rounds": _DEEPSEEK_INTERNAL_WEB_SEARCH_MAX_ROUNDS,
+                "queries": [call["query"][:240] for call in calls],
+            })
+            raise LLMRequestError(
+                "DeepSeek hosted web search exhausted its internal tool budget.",
+                status_code=502,
+            )
+
+        log_debug("DEEPSEEK_INTERNAL_WEB_SEARCH_TOOL_CALLS", {
+            "round": search_rounds + 1,
+            "call_count": len(calls),
+            "queries": [call["query"][:240] for call in calls],
+        })
+
+        tool_outputs: list[dict[str, Any]] = []
+        for call in calls:
+            queries = call["queries"] or ([call["query"]] if call["query"] else [])
+            if not queries:
+                raise LLMRequestError(
+                    "DeepSeek hosted web search call is missing query arguments.",
+                    status_code=502,
+                )
+            executor = DeepSeekAnthropicWebSearchExecutor(
+                context.base_url,
+                context.api_key,
+                context.upstream_model,
+            )
+            search_result = executor.execute(
+                queries,
+                max_tokens=min(
+                    int(data.get("max_completion_tokens", 256) or 256),
+                    256,
+                ),
+            )
+            total_tool_usage = _combine_responses_usage(
+                total_tool_usage,
+                search_result.usage,
+            )
+            tool_outputs.append({
+                "call_id": call["id"],
+                "output": _deepseek_web_search_context_message(call, search_result),
+            })
+            search_output_items.append(_deepseek_web_search_output_item(call))
+
+        _append_internal_tool_exchange(
+            payload,
+            result.response_message,
+            tool_outputs,
+        )
+        result = _responses_provider_result_from_llm(
+            context,
+            make_llm_request(payload, context.base_url, context.api_key),
+            None,
+            result.retry_count,
+        )
+        search_rounds += 1
+
+    if search_output_items:
+        result.output_items = [*search_output_items, *result.output_items]
+    result.usage = _combine_responses_usage(total_tool_usage, result.usage)
+    return result
 
 
 def _combine_responses_usage(
@@ -1766,9 +2006,13 @@ def responses_api() -> tuple[Any, int]:
             instructions,
             tools_raw,
         )
-        web_search_tool, main_tools_raw = _replace_xiaomi_web_search_with_internal_tool(
+        deepseek_web_search_tool, main_tools_raw = _replace_deepseek_web_search_with_internal_tool(
             context,
             tools_raw,
+        )
+        xiaomi_web_search_tool, main_tools_raw = _replace_xiaomi_web_search_with_internal_tool(
+            context,
+            main_tools_raw,
         )
         payload = _build_responses_chat_payload(data, context, main_tools_raw)
 
@@ -1798,11 +2042,18 @@ def responses_api() -> tuple[Any, int]:
             parse_result,
             retry_count,
         )
+        result = _run_deepseek_internal_tool_loop(
+            data,
+            context,
+            payload,
+            deepseek_web_search_tool,
+            result,
+        )
         result = _run_xiaomi_internal_tool_loop(
             data,
             context,
             payload,
-            web_search_tool,
+            xiaomi_web_search_tool,
             result,
         )
         result = _retry_plan_mode_recoveries(
