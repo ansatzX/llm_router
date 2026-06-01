@@ -32,7 +32,10 @@ def _deepseek_missing_reasoning_tool_call_ids(
 
 def _is_deepseek_missing_reasoning_error(error: LLMRequestError) -> bool:
     message = error.message.lower()
-    return "reasoning_content" in message and "thinking mode" in message
+    return (
+        ("reasoning_content" in message or "content[].thinking" in message)
+        and "thinking mode" in message
+    )
 
 
 def _llm_request_error_body(

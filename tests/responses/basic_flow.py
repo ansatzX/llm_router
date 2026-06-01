@@ -1,7 +1,6 @@
 """Responses endpoint regression tests."""
 
 import json
-from types import SimpleNamespace
 
 import llm_router.reasoning_summary as reasoning_summary_mod
 import llm_router.server as server_mod
@@ -60,73 +59,6 @@ def test_responses_deepseek_hosted_web_search_sse_item_identity(
         "llm_router.deepseek.anthropic_web_search.make_deepseek_anthropic_messages_request",
         fake_request,
     )
-    mock_make_request.side_effect = [
-        {
-            "created": 123,
-            "choices": [
-                {
-                    "message": {
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "id": "call_ws",
-                                "type": "function",
-                                "function": {
-                                    "name": "__router_deepseek_web_search",
-                                    "arguments": '{"query":"Search weather"}',
-                                },
-                            },
-                        ],
-                    },
-                    "finish_reason": "tool_calls",
-                }
-            ],
-            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-        },
-        {
-            "created": 124,
-            "choices": [
-                {
-                    "message": {
-                        "content": "Weather result.",
-                    },
-                    "finish_reason": "stop",
-                }
-            ],
-            "usage": {"prompt_tokens": 2, "completion_tokens": 2, "total_tokens": 4},
-        },
-    ]
-    monkeypatch.setattr(
-        "llm_router.deepseek.anthropic_web_search.DeepSeekAnthropicWebSearchExecutor.execute",
-        lambda self, queries, max_tokens=None, temperature=None, top_p=None: SimpleNamespace(
-            queries=queries,
-            searches=[
-                {
-                    "query": queries[0] if queries else "",
-                    "results": [
-                        {
-                            "type": "web_search_result",
-                            "url": "https://example.com/weather",
-                            "title": "Weather",
-                        }
-                    ],
-                    "text": "Weather result.",
-                }
-            ],
-            text="Weather result.",
-            usage={
-                "input_tokens": 1,
-                "input_tokens_details": {"cached_tokens": 0},
-                "output_tokens": 1,
-                "output_tokens_details": {"reasoning_tokens": 0},
-                "server_tool_use": {"web_search_requests": 1},
-                "total_tokens": 2,
-            },
-            raw_response={},
-            raw_responses=[],
-            content_blocks=[],
-        ),
-    )
     server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
         base_url="https://api.deepseek.com",
@@ -144,7 +76,7 @@ def test_responses_deepseek_hosted_web_search_sse_item_identity(
     )
 
     assert response.status_code == 200
-    assert mock_make_request.call_count == 2
+    assert mock_make_request.call_count == 0
     body = response.get_data(as_text=True)
     added = _sse_payloads(body, "response.output_item.added")
     done = _sse_payloads(body, "response.output_item.done")

@@ -184,6 +184,12 @@ def test_responses_deepseek_filters_hosted_web_search_tool_before_upstream(
         base_url="https://api.deepseek.com",
     )
     server_mod._config.default_upstream = "deepseek"
+    monkeypatch.setattr(
+        "llm_router.deepseek.anthropic_web_search.DeepSeekAnthropicWebSearchBridge.run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("Inactive web_search must stay on the Chat adapter path"),
+        ),
+    )
 
     response = client.post(
         "/v1/responses",
@@ -199,11 +205,11 @@ def test_responses_deepseek_filters_hosted_web_search_tool_before_upstream(
     assert "tools" not in payload
 
 
-def test_responses_deepseek_hosted_web_search_injects_internal_tool(
+def test_responses_deepseek_hosted_web_search_uses_anthropic_bridge(
     tmp_path,
     monkeypatch,
 ):
-    """Official DeepSeek should expose hosted web_search as an internal Chat tool."""
+    """Official DeepSeek hosted web_search should use the whole-turn bridge."""
     client, mock_make_request = _configure_test_app(
         tmp_path,
         monkeypatch,
@@ -213,60 +219,43 @@ def test_responses_deepseek_hosted_web_search_injects_internal_tool(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-    mock_make_request.side_effect = [
-        {
-            "created": 123,
-            "choices": [
+    bridge_calls: list[dict[str, object]] = []
+
+    def fake_bridge_run(
+        self,
+        *,
+        messages,
+        tools_raw,
+        max_tokens=None,
+        temperature=None,
+        top_p=None,
+        request_options=None,
+    ):
+        bridge_calls.append({
+            "base_url": self.base_url,
+            "model": self.model,
+            "messages": messages,
+            "tools_raw": tools_raw,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "top_p": top_p,
+            "request_options": request_options,
+        })
+        return SimpleNamespace(
+            output_items=[
                 {
-                    "message": {
-                        "content": None,
-                        "tool_calls": [
-                            {
-                                "id": "call_ws",
-                                "type": "function",
-                                "function": {
-                                    "name": "__router_deepseek_web_search",
-                                    "arguments": '{"query":"Search current docs"}',
-                                },
-                            },
-                        ],
-                    },
-                    "finish_reason": "tool_calls",
-                }
-            ],
-            "usage": {"prompt_tokens": 3, "completion_tokens": 4, "total_tokens": 7},
-        },
-        {
-            "created": 124,
-            "choices": [
+                    "type": "web_search_call",
+                    "id": "srvtoolu_1",
+                    "status": "completed",
+                    "action": {"type": "search", "query": "Search current docs"},
+                },
                 {
-                    "message": {
-                        "content": "Found the latest docs.",
-                    },
-                    "finish_reason": "stop",
-                }
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Found the latest docs."}],
+                },
             ],
-            "usage": {"prompt_tokens": 5, "completion_tokens": 6, "total_tokens": 11},
-        },
-    ]
-    monkeypatch.setattr(
-        "llm_router.deepseek.anthropic_web_search.DeepSeekAnthropicWebSearchExecutor.execute",
-        lambda self, queries, max_tokens=None, temperature=None, top_p=None: SimpleNamespace(
-            queries=queries,
-            searches=[
-                {
-                    "query": queries[0] if queries else "",
-                    "results": [
-                        {
-                            "type": "web_search_result",
-                            "url": "https://example.com/docs",
-                            "title": "Docs",
-                        }
-                    ],
-                    "text": "Docs summary",
-                }
-            ],
-            text="Docs summary",
+            output_text="Found the latest docs.",
             usage={
                 "input_tokens": 2,
                 "input_tokens_details": {"cached_tokens": 0},
@@ -275,10 +264,15 @@ def test_responses_deepseek_hosted_web_search_injects_internal_tool(
                 "server_tool_use": {"web_search_requests": 1},
                 "total_tokens": 5,
             },
-            raw_response={},
-            raw_responses=[],
-            content_blocks=[],
-        ),
+            raw_response={
+                "created": 124,
+                "content": [{"type": "text", "text": "Found the latest docs."}],
+            },
+        )
+
+    monkeypatch.setattr(
+        "llm_router.deepseek.anthropic_web_search.DeepSeekAnthropicWebSearchBridge.run",
+        fake_bridge_run,
     )
     server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
@@ -296,46 +290,316 @@ def test_responses_deepseek_hosted_web_search_injects_internal_tool(
     )
 
     assert response.status_code == 200
-    assert mock_make_request.call_count == 2
-    payload = mock_make_request.call_args_list[0].args[0]
-    assert payload["model"] == "test-model"
-    assert payload["messages"][0] == {"role": "user", "content": "Search current docs"}
-    assert payload["tools"] == [
+    assert mock_make_request.call_count == 0
+    assert bridge_calls == [
         {
-            "type": "function",
-            "function": {
-                "name": "__router_deepseek_web_search",
-                "description": (
-                    "Search the live web when current or external information is needed. "
-                    "Call this tool only when the user request requires web results."
-                ),
-                "parameters": {
-                    "type": "object",
-                    "properties": {
-                        "query": {
-                            "type": "string",
-                            "description": "Focused web search query.",
-                        },
-                        "queries": {
-                            "type": "array",
-                            "items": {
-                                "type": "string",
-                                "description": "Focused web search query.",
-                            },
-                            "description": "Focused web search queries.",
-                        },
-                    },
-                    "additionalProperties": False,
-                },
-            },
+            "base_url": "https://api.deepseek.com",
+            "model": "test-model",
+            "messages": [{"role": "user", "content": "Search current docs"}],
+            "tools_raw": [{"type": "web_search", "external_web_access": True}],
+            "max_tokens": None,
+            "temperature": None,
+            "top_p": None,
+            "request_options": {},
         }
     ]
     body = response.get_json()
     assert [item["type"] for item in body["output"]] == ["web_search_call", "message"]
-    assert body["output"][0]["id"] == "call_ws"
+    assert body["output"][0]["id"] == "srvtoolu_1"
     assert body["output"][0]["action"] == {"type": "search", "query": "Search current docs"}
     assert body["output"][1]["content"][0]["text"] == "Found the latest docs."
     assert body["output_text"] == "Found the latest docs."
+    assert body["usage"]["server_tool_use"] == {"web_search_requests": 1}
+
+
+def test_responses_deepseek_web_search_bridge_recovers_dsml_follow_up_queries(
+    tmp_path,
+    monkeypatch,
+):
+    """Provider DSML web_search residuals should be converted into hosted searches."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    requests: list[dict[str, object]] = []
+
+    def fake_request(payload, llm_base_url, api_key):
+        requests.append(payload)
+        if len(requests) == 1:
+            return {
+                "stop_reason": "end_turn",
+                "content": [
+                    {
+                        "type": "server_tool_use",
+                        "id": "srv_1",
+                        "name": "web_search",
+                        "input": {"query": "Cunxi Gong"},
+                    },
+                    {
+                        "type": "web_search_tool_result",
+                        "tool_use_id": "srv_1",
+                        "content": [],
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            '<｜｜DSML｜｜tool_calls>'
+                            '<｜｜DSML｜｜invoke name="web_search">'
+                            '<｜｜DSML｜｜parameter name="query" string="true">'
+                            "Cunxi Gong researcher affiliation"
+                            "</｜｜DSML｜｜parameter>"
+                            "</｜｜DSML｜｜invoke>"
+                            "</｜｜DSML｜｜tool_calls>"
+                        ),
+                    },
+                ],
+                "usage": {
+                    "input_tokens": 2,
+                    "output_tokens": 3,
+                    "server_tool_use": {"web_search_requests": 1},
+                },
+            }
+        return {
+            "stop_reason": "end_turn",
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "srv_2",
+                    "name": "web_search",
+                    "input": {"query": "Cunxi Gong researcher affiliation"},
+                },
+                {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": "srv_2",
+                    "content": [
+                        {
+                            "type": "web_search_result",
+                            "url": "https://example.com/cunxi-gong",
+                            "title": "Cunxi Gong",
+                        }
+                    ],
+                },
+                {"type": "text", "text": "Recovered answer."},
+            ],
+            "usage": {
+                "input_tokens": 4,
+                "output_tokens": 5,
+                "server_tool_use": {"web_search_requests": 1},
+            },
+        }
+
+    monkeypatch.setattr(
+        "llm_router.deepseek.anthropic_web_search.make_deepseek_anthropic_messages_request",
+        fake_request,
+    )
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": "搜索一下，谁是Cunxi Gong",
+            "tools": [{"type": "web_search", "external_web_access": True}],
+        },
+    )
+
+    assert response.status_code == 200
+    assert mock_make_request.call_count == 0
+    body = response.get_json()
+    assert [item["type"] for item in body["output"]] == [
+        "web_search_call",
+        "web_search_call",
+        "message",
+    ]
+    assert body["output"][1]["action"] == {
+        "type": "search",
+        "query": "Cunxi Gong researcher affiliation",
+    }
+    assert body["output_text"] == "Recovered answer."
+    assert body["usage"]["server_tool_use"] == {"web_search_requests": 2}
+
+
+def test_responses_deepseek_web_search_bridge_preserves_function_tool_calls(
+    tmp_path,
+    monkeypatch,
+):
+    """Mixed hosted web_search and ordinary tools must keep tool-call state."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+
+    function_call = {
+        "type": "function_call",
+        "id": "toolu_1",
+        "call_id": "toolu_1",
+        "name": "read_file",
+        "arguments": '{"path":"README.md"}',
+    }
+
+    def fake_bridge_run(
+        self,
+        *,
+        messages,
+        tools_raw,
+        max_tokens=None,
+        temperature=None,
+        top_p=None,
+        request_options=None,
+    ):
+        return SimpleNamespace(
+            output_items=[function_call],
+            output_text=None,
+            usage={
+                "input_tokens": 2,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 1,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "server_tool_use": {"web_search_requests": 0},
+                "total_tokens": 3,
+            },
+            raw_response={"created": 125, "stop_reason": "tool_use"},
+        )
+
+    monkeypatch.setattr(
+        "llm_router.deepseek.anthropic_web_search.DeepSeekAnthropicWebSearchBridge.run",
+        fake_bridge_run,
+    )
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": "Search docs, then inspect README if needed.",
+            "tools": [
+                {"type": "web_search", "external_web_access": True},
+                {
+                    "type": "function",
+                    "name": "read_file",
+                    "description": "Read a file",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"path": {"type": "string"}},
+                        "required": ["path"],
+                    },
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert mock_make_request.call_count == 0
+    body = response.get_json()
+    assert body["output"] == [function_call]
+    assert body["output_text"] is None
+    assert body["tool_calls"] == [function_call]
+    assert len(server_mod._sessions) == 1
+
+
+def test_responses_deepseek_web_search_bridge_forwards_request_controls(
+    tmp_path,
+    monkeypatch,
+):
+    """Bridge path must preserve supported Codex request-control fields."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    bridge_calls: list[dict[str, object]] = []
+
+    def fake_bridge_run(
+        self,
+        *,
+        messages,
+        tools_raw,
+        max_tokens=None,
+        temperature=None,
+        top_p=None,
+        request_options=None,
+    ):
+        bridge_calls.append({
+            "request_options": request_options,
+            "max_tokens": max_tokens,
+        })
+        return SimpleNamespace(
+            output_items=[
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "No search used."}],
+                }
+            ],
+            output_text="No search used.",
+            usage={
+                "input_tokens": 2,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 3,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "server_tool_use": {"web_search_requests": 0},
+                "total_tokens": 5,
+            },
+            raw_response={"created": 126, "stop_reason": "end_turn"},
+        )
+
+    monkeypatch.setattr(
+        "llm_router.deepseek.anthropic_web_search.DeepSeekAnthropicWebSearchBridge.run",
+        fake_bridge_run,
+    )
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": "Search current docs",
+            "tools": [{"type": "web_search", "external_web_access": True}],
+            "tool_choice": "none",
+            "reasoning": {"effort": "high"},
+            "stop": "DONE",
+            "max_output_tokens": 4096,
+        },
+    )
+
+    assert response.status_code == 200
+    assert mock_make_request.call_count == 0
+    assert bridge_calls == [
+        {
+            "request_options": {
+                "tool_choice": {"type": "none"},
+                "output_config": {"effort": "high"},
+                "stop_sequences": ["DONE"],
+            },
+            "max_tokens": 4096,
+        }
+    ]
 
 
 def test_responses_deepseek_mcp_first_web_search_stays_on_chat_path(

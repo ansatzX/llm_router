@@ -10,6 +10,7 @@ from llm_router.deepseek.anthropic_web_search import (
     DeepSeekAnthropicWebSearchBridge,
     DeepSeekAnthropicWebSearchExecutor,
     _anthropic_messages_url,
+    _anthropic_request_options_from_responses_payload,
     _anthropic_tool_from_codex_web_search,
     _messages_from_chat_messages,
     _queries_from_dsml_text,
@@ -56,6 +57,7 @@ def test_codex_web_search_maps_to_supported_anthropic_tool_fields():
     assert tool == {
         "type": "web_search_20250305",
         "name": "web_search",
+        "max_uses": 100,
         "search_context_size": "high",
         "allowed_domains": ["example.com"],
         "user_location": {
@@ -65,6 +67,16 @@ def test_codex_web_search_maps_to_supported_anthropic_tool_fields():
             "city": "San Francisco",
             "timezone": "America/Los_Angeles",
         },
+    }
+
+
+def test_anthropic_web_search_tool_adds_default_max_uses():
+    tool = _anthropic_tool_from_codex_web_search({"type": "web_search"})
+
+    assert tool == {
+        "type": "web_search_20250305",
+        "name": "web_search",
+        "max_uses": 100,
     }
 
 
@@ -79,7 +91,50 @@ def test_codex_web_search_drops_unverified_options():
         }
     )
 
-    assert tool == {"type": "web_search_20250305", "name": "web_search"}
+    assert tool == {
+        "type": "web_search_20250305",
+        "name": "web_search",
+        "max_uses": 100,
+    }
+
+
+def test_anthropic_request_options_map_codex_controls_to_supported_fields():
+    options = _anthropic_request_options_from_responses_payload(
+        {
+            "tool_choice": {
+                "type": "function",
+                "function": {"name": "read_file"},
+            },
+            "parallel_tool_calls": False,
+            "reasoning": {"effort": "high"},
+            "stop": ["END"],
+        }
+    )
+
+    assert options == {
+        "tool_choice": {"type": "tool", "name": "read_file"},
+        "output_config": {"effort": "high"},
+        "stop_sequences": ["END"],
+    }
+
+
+def test_anthropic_request_options_preserve_explicit_anthropic_fields():
+    options = _anthropic_request_options_from_responses_payload(
+        {
+            "tool_choice": "none",
+            "reasoning": {"effort": "low"},
+            "thinking": {"type": "enabled", "budget_tokens": 2048},
+            "output_config": {"effort": "medium"},
+            "stop": "DONE",
+        }
+    )
+
+    assert options == {
+        "tool_choice": {"type": "none"},
+        "thinking": {"type": "enabled", "budget_tokens": 2048},
+        "output_config": {"effort": "medium"},
+        "stop_sequences": ["DONE"],
+    }
 
 
 @pytest.mark.parametrize(
@@ -177,8 +232,14 @@ def test_executor_runs_minimal_web_search_request_and_parses_search_results(monk
     assert requests[0] == {
         "model": "deepseek-v4-pro",
         "messages": [{"role": "user", "content": "Rust tutorials"}],
-        "tools": [{"type": "web_search_20250305", "name": "web_search"}],
-        "max_tokens": 256,
+        "tools": [
+            {
+                "type": "web_search_20250305",
+                "name": "web_search",
+                "max_uses": 100,
+            }
+        ],
+        "max_tokens": 524288,
     }
     assert isinstance(result, DeepSeekAnthropicSearchExecution)
     assert result.searches[0]["id"] == "srv_1"
@@ -600,6 +661,208 @@ def test_messages_from_chat_messages_groups_parallel_tool_results():
     ]
 
 
+def test_messages_from_chat_messages_replays_reasoning_content_as_thinking():
+    messages = _messages_from_chat_messages(
+        [
+            {"role": "user", "content": "search"},
+            {
+                "role": "assistant",
+                "content": "answer",
+                "reasoning_content": "private chain",
+            },
+            {"role": "user", "content": "continue"},
+        ]
+    )
+
+    assert messages == [
+        {"role": "user", "content": "search"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "private chain"},
+                {"type": "text", "text": "answer"},
+            ],
+        },
+        {"role": "user", "content": "continue"},
+    ]
+
+
+def test_messages_from_chat_messages_replays_tool_reasoning_as_thinking():
+    messages = _messages_from_chat_messages(
+        [
+            {"role": "user", "content": "inspect repo"},
+            {
+                "role": "assistant",
+                "content": None,
+                "reasoning_content": "need file",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_a",
+                            "arguments": "{}",
+                        },
+                    }
+                ],
+            },
+        ]
+    )
+
+    assert messages == [
+        {"role": "user", "content": "inspect repo"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "need file"},
+                {"type": "tool_use", "id": "call_1", "name": "read_a", "input": {}},
+            ],
+        },
+    ]
+
+
+def test_bridge_parses_server_side_web_search_blocks_into_responses_items(
+    monkeypatch,
+):
+    bridge = DeepSeekAnthropicWebSearchBridge(
+        base_url="https://api.deepseek.com",
+        api_key="sk-test",
+        model="deepseek-v4-pro",
+    )
+    requests: list[dict[str, object]] = []
+
+    def fake_request(payload, llm_base_url, api_key):
+        requests.append(payload)
+        return {
+            "stop_reason": "end_turn",
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "srv_1",
+                    "name": "web_search",
+                    "input": {"query": "Cunxi Gong"},
+                },
+                {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": "srv_1",
+                    "content": [
+                        {
+                            "type": "web_search_result",
+                            "url": "https://example.com/cunxi-gong",
+                            "title": "Cunxi Gong",
+                            "encrypted_content": "enc",
+                        }
+                    ],
+                },
+                {"type": "text", "text": "Answer with citation."},
+            ],
+            "usage": {
+                "input_tokens": 3,
+                "output_tokens": 4,
+                "server_tool_use": {"web_search_requests": 1},
+            },
+        }
+
+    monkeypatch.setattr(
+        "llm_router.deepseek.anthropic_web_search.make_deepseek_anthropic_messages_request",
+        fake_request,
+    )
+
+    result = bridge.run(
+        messages=[{"role": "user", "content": "Who is Cunxi Gong?"}],
+        tools_raw=[{"type": "web_search"}],
+    )
+
+    assert len(requests) == 1
+    assert requests[0]["max_tokens"] == 524288
+    assert [item["type"] for item in result.output_items] == [
+        "web_search_call",
+        "message",
+    ]
+    assert result.output_items[0]["action"] == {
+        "type": "search",
+        "query": "Cunxi Gong",
+    }
+    assert result.output_items[1]["content"] == [
+        {"type": "output_text", "text": "Answer with citation."}
+    ]
+    assert result.output_text == "Answer with citation."
+
+
+def test_bridge_preserves_thinking_blocks_for_session_replay(monkeypatch):
+    bridge = DeepSeekAnthropicWebSearchBridge(
+        base_url="https://api.deepseek.com",
+        api_key="sk-test",
+        model="deepseek-v4-pro",
+    )
+
+    def fake_request(payload, llm_base_url, api_key):
+        return {
+            "stop_reason": "end_turn",
+            "content": [
+                {"type": "thinking", "thinking": "private search reasoning"},
+                {"type": "text", "text": "Answer with reasoning."},
+            ],
+            "usage": {"input_tokens": 3, "output_tokens": 4},
+        }
+
+    monkeypatch.setattr(
+        "llm_router.deepseek.anthropic_web_search.make_deepseek_anthropic_messages_request",
+        fake_request,
+    )
+
+    result = bridge.run(
+        messages=[{"role": "user", "content": "Who is Cunxi Gong?"}],
+        tools_raw=[{"type": "web_search"}],
+    )
+
+    assert [item["type"] for item in result.output_items] == [
+        "reasoning",
+        "message",
+    ]
+    assert result.output_items[0]["content"] == [
+        {"type": "reasoning_text", "text": "private search reasoning"}
+    ]
+    assert result.output_items[1]["reasoning_content"] == "private search reasoning"
+    assert result.output_text == "Answer with reasoning."
+
+
+def test_bridge_forwards_supported_request_options(monkeypatch):
+    bridge = DeepSeekAnthropicWebSearchBridge(
+        base_url="https://api.deepseek.com",
+        api_key="sk-test",
+        model="deepseek-v4-pro",
+    )
+    requests: list[dict[str, object]] = []
+
+    def fake_request(payload, llm_base_url, api_key):
+        requests.append(payload)
+        return {
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "ok"}],
+            "usage": {"input_tokens": 1, "output_tokens": 1},
+        }
+
+    monkeypatch.setattr(
+        "llm_router.deepseek.anthropic_web_search.make_deepseek_anthropic_messages_request",
+        fake_request,
+    )
+
+    bridge.run(
+        messages=[{"role": "user", "content": "Search Rust tutorials"}],
+        tools_raw=[{"type": "web_search"}],
+        request_options={
+            "tool_choice": {"type": "none"},
+            "output_config": {"effort": "high"},
+            "stop_sequences": ["END"],
+        },
+    )
+
+    assert requests[0]["tool_choice"] == {"type": "none"}
+    assert requests[0]["output_config"] == {"effort": "high"}
+    assert requests[0]["stop_sequences"] == ["END"]
+
+
 def test_bridge_runs_pause_turn_continuation_and_parses_search_blocks(monkeypatch):
     bridge = DeepSeekAnthropicWebSearchBridge(
         base_url="https://api.deepseek.com",
@@ -695,6 +958,7 @@ def test_bridge_runs_pause_turn_continuation_and_parses_search_blocks(monkeypatc
         {
             "type": "web_search_20250305",
             "name": "web_search",
+            "max_uses": 100,
             "allowed_domains": ["rust-lang.org"],
             "user_location": {
                 "type": "approximate",
@@ -705,7 +969,33 @@ def test_bridge_runs_pause_turn_continuation_and_parses_search_blocks(monkeypatc
             },
         }
     ]
-    assert requests[1]["messages"][-1]["role"] == "assistant"
+    assert requests[1]["messages"] == [
+        {"role": "user", "content": "Search Rust tutorials"},
+        {
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "srv_1",
+                    "name": "web_search",
+                    "input": {"query": "Rust tutorials"},
+                },
+                {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": "srv_1",
+                    "content": [
+                        {
+                            "type": "web_search_result",
+                            "url": "https://www.rust-lang.org/learn",
+                            "title": "Rust Learn",
+                            "encrypted_content": "enc",
+                            "page_age": "April 30, 2025",
+                        }
+                    ],
+                },
+            ],
+        },
+    ]
     assert result.output_items == [
         {
             "type": "web_search_call",
@@ -744,7 +1034,109 @@ def test_bridge_runs_pause_turn_continuation_and_parses_search_blocks(monkeypatc
     }
 
 
-def test_bridge_rejects_dsml_residual_text(monkeypatch):
+def test_bridge_recovers_dsml_residual_web_search_queries(monkeypatch):
+    bridge = DeepSeekAnthropicWebSearchBridge(
+        base_url="https://api.deepseek.com",
+        api_key="sk-test",
+        model="deepseek-v4-pro",
+    )
+    requests: list[dict[str, object]] = []
+
+    def fake_request(payload, llm_base_url, api_key):
+        requests.append(payload)
+        if len(requests) == 1:
+            return {
+                "stop_reason": "end_turn",
+                "content": [
+                    {"type": "thinking", "thinking": "need another search"},
+                    {
+                        "type": "server_tool_use",
+                        "id": "srv_1",
+                        "name": "web_search",
+                        "input": {"query": "Cunxi Gong"},
+                    },
+                    {
+                        "type": "web_search_tool_result",
+                        "tool_use_id": "srv_1",
+                        "content": [],
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            '<｜｜DSML｜｜tool_calls>'
+                            '<｜｜DSML｜｜invoke name="web_search">'
+                            '<｜｜DSML｜｜parameter name="query" string="true">'
+                            "Cunxi Gong researcher affiliation"
+                            "</｜｜DSML｜｜parameter>"
+                            "</｜｜DSML｜｜invoke>"
+                            "</｜｜DSML｜｜tool_calls>"
+                        ),
+                    },
+                ],
+                "usage": {
+                    "input_tokens": 3,
+                    "output_tokens": 4,
+                    "server_tool_use": {"web_search_requests": 1},
+                },
+            }
+        assert "Cunxi Gong researcher affiliation" in requests[1]["messages"][-1]["content"]
+        assert "DSML" not in str(requests[1]["messages"][-2]["content"])
+        return {
+            "stop_reason": "end_turn",
+            "content": [
+                {
+                    "type": "server_tool_use",
+                    "id": "srv_2",
+                    "name": "web_search",
+                    "input": {"query": "Cunxi Gong researcher affiliation"},
+                },
+                {
+                    "type": "web_search_tool_result",
+                    "tool_use_id": "srv_2",
+                    "content": [
+                        {
+                            "type": "web_search_result",
+                            "url": "https://example.com/cunxi-gong",
+                            "title": "Cunxi Gong",
+                        }
+                    ],
+                },
+                {"type": "text", "text": "Recovered answer."},
+            ],
+            "usage": {
+                "input_tokens": 5,
+                "output_tokens": 6,
+                "server_tool_use": {"web_search_requests": 1},
+            },
+        }
+
+    monkeypatch.setattr(
+        "llm_router.deepseek.anthropic_web_search.make_deepseek_anthropic_messages_request",
+        fake_request,
+    )
+
+    result = bridge.run(
+        messages=[{"role": "user", "content": "Search docs"}],
+        tools_raw=[{"type": "web_search"}],
+    )
+
+    assert len(requests) == 2
+    assert [item["type"] for item in result.output_items] == [
+        "reasoning",
+        "web_search_call",
+        "web_search_call",
+        "message",
+    ]
+    assert result.output_items[1]["action"] == {"type": "search", "query": "Cunxi Gong"}
+    assert result.output_items[2]["action"] == {
+        "type": "search",
+        "query": "Cunxi Gong researcher affiliation",
+    }
+    assert result.output_text == "Recovered answer."
+    assert result.usage["server_tool_use"] == {"web_search_requests": 2}
+
+
+def test_bridge_rejects_dsml_residual_text_without_queries(monkeypatch):
     bridge = DeepSeekAnthropicWebSearchBridge(
         base_url="https://api.deepseek.com",
         api_key="sk-test",

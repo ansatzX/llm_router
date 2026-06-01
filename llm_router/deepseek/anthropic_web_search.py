@@ -17,6 +17,8 @@ from llm_router.responses_state.usage import _responses_usage_from_provider
 
 _ANTHROPIC_VERSION = "2023-06-01"
 _WEB_SEARCH_TOOL_VERSION = "web_search_20250305"
+_WEB_SEARCH_MAX_USES = 100
+_WEB_SEARCH_DEFAULT_MAX_TOKENS = 524288
 _MAX_PAUSE_TURN_RETRIES = 4
 
 
@@ -28,6 +30,7 @@ class DeepSeekAnthropicWebSearchResult:
     output_text: str | None
     usage: dict[str, Any]
     raw_response: dict[str, Any]
+    tool_calls_list: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -64,6 +67,7 @@ def _anthropic_tool_from_codex_web_search(tool: dict[str, Any]) -> dict[str, Any
     converted: dict[str, Any] = {
         "type": _WEB_SEARCH_TOOL_VERSION,
         "name": "web_search",
+        "max_uses": _WEB_SEARCH_MAX_USES,
     }
     search_context_size = tool.get("search_context_size")
     if search_context_size in {"low", "medium", "high"}:
@@ -86,6 +90,109 @@ def _anthropic_tool_from_codex_web_search(tool: dict[str, Any]) -> dict[str, Any
             and value
         }
     return converted
+
+
+def _anthropic_tool_choice_from_responses_tool_choice(
+    tool_choice: Any,
+) -> dict[str, Any] | None:
+    if isinstance(tool_choice, str):
+        if tool_choice in {"none", "auto", "any"}:
+            return {"type": tool_choice}
+        return None
+    if not isinstance(tool_choice, dict):
+        return None
+
+    choice_type = tool_choice.get("type")
+    if choice_type in {"none", "auto", "any"}:
+        return {"type": choice_type}
+    if choice_type == "tool":
+        name = tool_choice.get("name")
+        if isinstance(name, str) and name:
+            return {"type": "tool", "name": name}
+    if choice_type == "function":
+        function = tool_choice.get("function")
+        if isinstance(function, dict):
+            name = function.get("name")
+            if isinstance(name, str) and name:
+                return {"type": "tool", "name": name}
+        name = tool_choice.get("name")
+        if isinstance(name, str) and name:
+            return {"type": "tool", "name": name}
+    return None
+
+
+def _reasoning_effort_from_responses_payload(data: dict[str, Any]) -> str | None:
+    reasoning_effort = data.get("reasoning_effort")
+    if isinstance(reasoning_effort, str) and reasoning_effort:
+        return reasoning_effort
+
+    reasoning = data.get("reasoning")
+    if isinstance(reasoning, dict):
+        effort = reasoning.get("effort")
+        if isinstance(effort, str) and effort:
+            return effort
+    return None
+
+
+def _stop_sequences_from_responses_payload(data: dict[str, Any]) -> list[str] | None:
+    stop_sequences = data.get("stop_sequences")
+    if isinstance(stop_sequences, list):
+        values = [item for item in stop_sequences if isinstance(item, str)]
+        return values or None
+
+    stop = data.get("stop")
+    if isinstance(stop, str) and stop:
+        return [stop]
+    if isinstance(stop, list):
+        values = [item for item in stop if isinstance(item, str)]
+        return values or None
+    return None
+
+
+def _anthropic_request_options_from_responses_payload(
+    data: dict[str, Any],
+) -> dict[str, Any]:
+    options: dict[str, Any] = {}
+
+    tool_choice = _anthropic_tool_choice_from_responses_tool_choice(
+        data.get("tool_choice"),
+    )
+    if tool_choice is not None:
+        options["tool_choice"] = tool_choice
+
+    thinking = data.get("thinking")
+    if isinstance(thinking, dict):
+        options["thinking"] = thinking
+
+    output_config = data.get("output_config")
+    if isinstance(output_config, dict):
+        options["output_config"] = output_config
+    else:
+        effort = _reasoning_effort_from_responses_payload(data)
+        if effort:
+            options["output_config"] = {"effort": effort}
+
+    stop_sequences = _stop_sequences_from_responses_payload(data)
+    if stop_sequences is not None:
+        options["stop_sequences"] = stop_sequences
+
+    return options
+
+
+def _dsml_follow_up_prompt(queries: list[str]) -> str:
+    query_lines = "\n".join(f"- {query}" for query in queries)
+    return (
+        "Continue the same answer by using the hosted web_search tool for these "
+        "extracted follow-up queries. Do not write DSML or tool-call markup as "
+        f"assistant text.\n{query_lines}"
+    )
+
+
+def _tool_choice_disables_tools(request_options: dict[str, Any] | None) -> bool:
+    if not request_options:
+        return False
+    tool_choice = request_options.get("tool_choice")
+    return isinstance(tool_choice, dict) and tool_choice.get("type") == "none"
 
 
 def _message_content_to_text(content: Any) -> str:
@@ -337,7 +444,7 @@ def _messages_from_chat_messages(messages: list[dict[str, Any]]) -> list[dict[st
                 })
             continue
         if role == "assistant" and isinstance(message.get("tool_calls"), list):
-            blocks: list[dict[str, Any]] = []
+            blocks: list[dict[str, Any]] = _thinking_blocks_from_message(message)
             text = _message_content_to_text(message.get("content"))
             if text:
                 blocks.append({"type": "text", "text": text})
@@ -370,7 +477,16 @@ def _messages_from_chat_messages(messages: list[dict[str, Any]]) -> list[dict[st
             continue
         if role == "assistant":
             text = _message_content_to_text(message.get("content"))
-            if text:
+            thinking_blocks = _thinking_blocks_from_message(message)
+            if thinking_blocks:
+                content: list[dict[str, Any]] = [*thinking_blocks]
+                if text:
+                    content.append({"type": "text", "text": text})
+                anthropic_messages.append({
+                    "role": "assistant",
+                    "content": content,
+                })
+            elif text:
                 anthropic_messages.append({
                     "role": "assistant",
                     "content": text,
@@ -385,6 +501,13 @@ def _messages_from_chat_messages(messages: list[dict[str, Any]]) -> list[dict[st
             })
         index += 1
     return anthropic_messages
+
+
+def _thinking_blocks_from_message(message: dict[str, Any]) -> list[dict[str, Any]]:
+    reasoning_content = message.get("reasoning_content")
+    if isinstance(reasoning_content, str) and reasoning_content:
+        return [{"type": "thinking", "thinking": reasoning_content}]
+    return []
 
 
 def _collect_tool_result_blocks(
@@ -762,8 +885,16 @@ class DeepSeekAnthropicWebSearchExecutor:
             request_payload: dict[str, Any] = {
                 "model": self.model,
                 "messages": list(messages),
-                "tools": [{"type": _WEB_SEARCH_TOOL_VERSION, "name": "web_search"}],
-                "max_tokens": max_tokens if isinstance(max_tokens, int) and max_tokens > 0 else 256,
+                "tools": [
+                    {
+                        "type": _WEB_SEARCH_TOOL_VERSION,
+                        "name": "web_search",
+                        "max_uses": _WEB_SEARCH_MAX_USES,
+                    }
+                ],
+                "max_tokens": max_tokens
+                if isinstance(max_tokens, int) and max_tokens > 0
+                else _WEB_SEARCH_DEFAULT_MAX_TOKENS,
             }
             if isinstance(temperature, (int, float)):
                 request_payload["temperature"] = temperature
@@ -810,6 +941,7 @@ class DeepSeekAnthropicWebSearchBridge:
         max_tokens: int | None = None,
         temperature: float | None = None,
         top_p: float | None = None,
+        request_options: dict[str, Any] | None = None,
     ) -> DeepSeekAnthropicWebSearchResult:
         anthropic_messages = _messages_from_chat_messages(messages)
         system = _system_from_chat_messages(messages)
@@ -818,16 +950,21 @@ class DeepSeekAnthropicWebSearchBridge:
         accumulated_content: list[dict[str, Any]] = []
         combined_usage: dict[str, Any] = _responses_usage_from_provider({})
         last_response: dict[str, Any] = {}
+        seen_dsml_queries: set[str] = set()
 
         for _attempt in range(_MAX_PAUSE_TURN_RETRIES):
             request_payload: dict[str, Any] = {
                 "model": self.model,
                 "messages": list(anthropic_messages),
                 "tools": tools,
-                "max_tokens": max_tokens if isinstance(max_tokens, int) and max_tokens > 0 else 1024,
+                "max_tokens": max_tokens
+                if isinstance(max_tokens, int) and max_tokens > 0
+                else _WEB_SEARCH_DEFAULT_MAX_TOKENS,
             }
             if system:
                 request_payload["system"] = system
+            if request_options:
+                request_payload.update(request_options)
             if isinstance(temperature, (int, float)):
                 request_payload["temperature"] = temperature
             if isinstance(top_p, (int, float)):
@@ -839,18 +976,59 @@ class DeepSeekAnthropicWebSearchBridge:
             )
             last_response = response
             response_content = response.get("content") or []
+            response_blocks = [
+                block for block in response_content if isinstance(block, dict)
+            ] if isinstance(response_content, list) else []
+            had_dsml_residual = any(
+                block.get("type") == "text"
+                and isinstance(block.get("text"), str)
+                and _looks_like_dsml_tool_call(block["text"])
+                for block in response_blocks
+            )
+            filtered_blocks, follow_up_queries = (
+                _response_blocks_without_dsml_residual_text(response_blocks)
+            )
             if isinstance(response_content, list):
-                accumulated_content.extend(
-                    block for block in response_content if isinstance(block, dict)
-                )
+                accumulated_content.extend(filtered_blocks)
             combined_usage = _combine_usage(combined_usage, _usage_from_anthropic_response(response))
+            if follow_up_queries:
+                if _tool_choice_disables_tools(request_options):
+                    raise LLMRequestError(
+                        "DeepSeek Anthropic web search returned DSML residual tool call text.",
+                        status_code=502,
+                    )
+                new_queries = [
+                    query for query in follow_up_queries
+                    if query not in seen_dsml_queries
+                ]
+                if not new_queries:
+                    raise LLMRequestError(
+                        "DeepSeek Anthropic web search repeated DSML residual tool calls.",
+                        status_code=502,
+                    )
+                seen_dsml_queries.update(new_queries)
+                if filtered_blocks:
+                    anthropic_messages.append({
+                        "role": "assistant",
+                        "content": filtered_blocks,
+                    })
+                anthropic_messages.append({
+                    "role": "user",
+                    "content": _dsml_follow_up_prompt(new_queries),
+                })
+                continue
+            if had_dsml_residual:
+                raise LLMRequestError(
+                    "DeepSeek Anthropic web search returned DSML residual tool call text.",
+                    status_code=502,
+                )
             if response.get("stop_reason") != "pause_turn":
                 break
-            if not response_content:
+            if not filtered_blocks:
                 break
             anthropic_messages.append({
                 "role": "assistant",
-                "content": response_content,
+                "content": filtered_blocks,
             })
         output_items, output_text, tool_calls_list = _parse_response_blocks(
             accumulated_content,
@@ -861,6 +1039,7 @@ class DeepSeekAnthropicWebSearchBridge:
             output_text=output_text,
             usage=combined_usage,
             raw_response=last_response,
+            tool_calls_list=tool_calls_list,
         )
         return result
 
@@ -874,17 +1053,42 @@ def _parse_response_blocks(
     current_text_items: list[dict[str, Any]] = []
     current_text_parts: list[str] = []
     all_text_parts: list[str] = []
+    thinking_parts: list[str] = []
     has_tool_calls = False
+    emitted_reasoning = False
+
+    def reasoning_text() -> str:
+        return "\n".join(thinking_parts)
+
+    def ensure_reasoning_item() -> None:
+        nonlocal emitted_reasoning
+        text = reasoning_text()
+        if emitted_reasoning or not text:
+            return
+        output_items.append({
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": ""}],
+            "content": [{"type": "reasoning_text", "text": text}],
+        })
+        emitted_reasoning = True
+
+    def attach_reasoning(item: dict[str, Any]) -> None:
+        text = reasoning_text()
+        if text:
+            item["reasoning_content"] = text
 
     def flush_text_items() -> None:
         nonlocal current_text_items, current_text_parts
         if not current_text_items:
             return
-        output_items.append({
+        ensure_reasoning_item()
+        item = {
             "type": "message",
             "role": "assistant",
             "content": current_text_items,
-        })
+        }
+        attach_reasoning(item)
+        output_items.append(item)
         current_text_items = []
         current_text_parts = []
 
@@ -913,6 +1117,7 @@ def _parse_response_blocks(
                 if query
                 else {"type": "other"}
             )
+            ensure_reasoning_item()
             output_items.append({
                 "type": "web_search_call",
                 "id": call_id,
@@ -931,6 +1136,8 @@ def _parse_response_blocks(
             if item is None:
                 continue
             flush_text_items()
+            ensure_reasoning_item()
+            attach_reasoning(item)
             output_items.append(item)
             tool_calls_list.append(item)
             has_tool_calls = True
@@ -956,6 +1163,9 @@ def _parse_response_blocks(
             all_text_parts.append(text)
             continue
         if block_type == "thinking":
+            thinking = block.get("thinking")
+            if isinstance(thinking, str) and thinking:
+                thinking_parts.append(thinking)
             continue
 
     flush_text_items()

@@ -123,35 +123,21 @@ def test_responses_deepseek_web_search_failure_does_not_commit_session(
         },
     )
 
-    mock_make_request.return_value = {
-        "created": 123,
-        "choices": [
-            {
-                "message": {
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "call_ws",
-                            "type": "function",
-                            "function": {
-                                "name": "__router_deepseek_web_search",
-                                "arguments": '{"query":"Find current docs"}',
-                            },
-                        },
-                    ],
-                },
-                "finish_reason": "tool_calls",
-            }
-        ],
-        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-    }
-
-    def failing_request(self, queries, max_tokens=None, temperature=None, top_p=None):
+    def failing_bridge_run(
+        self,
+        *,
+        messages,
+        tools_raw,
+        max_tokens=None,
+        temperature=None,
+        top_p=None,
+        request_options=None,
+    ):
         raise LLMRequestError("bridge failed", status_code=503)
 
     monkeypatch.setattr(
-        "llm_router.deepseek.anthropic_web_search.DeepSeekAnthropicWebSearchExecutor.execute",
-        failing_request,
+        "llm_router.deepseek.anthropic_web_search.DeepSeekAnthropicWebSearchBridge.run",
+        failing_bridge_run,
     )
     server_mod._config.default_model_type = "responses_chat"
     server_mod._config.upstreams["deepseek"] = UpstreamConfig(
@@ -171,7 +157,7 @@ def test_responses_deepseek_web_search_failure_does_not_commit_session(
     assert response.status_code == 502
     assert response.get_json()["error"]["code"] == "provider_error"
     assert len(server_mod._sessions) == 0
-    assert mock_make_request.call_count == 1
+    assert mock_make_request.call_count == 0
 
 
 def test_responses_deepseek_malformed_web_search_result_does_not_commit_session(
@@ -188,29 +174,6 @@ def test_responses_deepseek_malformed_web_search_result_does_not_commit_session(
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
         },
     )
-
-    mock_make_request.return_value = {
-        "created": 123,
-        "choices": [
-            {
-                "message": {
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": "call_ws",
-                            "type": "function",
-                            "function": {
-                                "name": "__router_deepseek_web_search",
-                                "arguments": '{"query":"Find current docs"}',
-                            },
-                        },
-                    ],
-                },
-                "finish_reason": "tool_calls",
-            }
-        ],
-        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
-    }
 
     def malformed_request(payload, llm_base_url, api_key):
         return {
@@ -241,7 +204,144 @@ def test_responses_deepseek_malformed_web_search_result_does_not_commit_session(
     assert response.status_code == 502
     assert response.get_json()["error"]["code"] == "provider_error"
     assert len(server_mod._sessions) == 0
-    assert mock_make_request.call_count == 1
+    assert mock_make_request.call_count == 0
+
+
+def test_responses_deepseek_anthropic_bridge_replays_thinking_blocks(
+    tmp_path,
+    monkeypatch,
+):
+    """DeepSeek Anthropic thinking blocks must survive previous_response_id replay."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    requests: list[dict[str, object]] = []
+
+    def fake_request(payload, llm_base_url, api_key):
+        requests.append(payload)
+        if len(requests) == 1:
+            return {
+                "stop_reason": "end_turn",
+                "content": [
+                    {"type": "thinking", "thinking": "identify the right Cunxi Gong"},
+                    {"type": "text", "text": "First answer."},
+                ],
+                "usage": {"input_tokens": 3, "output_tokens": 4},
+            }
+        return {
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "Second answer."}],
+            "usage": {"input_tokens": 5, "output_tokens": 6},
+        }
+
+    monkeypatch.setattr(
+        "llm_router.deepseek.anthropic_web_search.make_deepseek_anthropic_messages_request",
+        fake_request,
+    )
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    first = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": "搜索一下，谁是Cunxi Gong",
+            "tools": [{"type": "web_search", "external_web_access": True}],
+            "reasoning": {"effort": "high"},
+        },
+    )
+    assert first.status_code == 200
+
+    second = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "previous_response_id": first.get_json()["id"],
+            "input": "继续",
+            "tools": [{"type": "web_search", "external_web_access": True}],
+            "reasoning": {"effort": "high"},
+        },
+    )
+
+    assert second.status_code == 200
+    assert mock_make_request.call_count == 0
+    assert requests[1]["messages"] == [
+        {"role": "user", "content": "搜索一下，谁是Cunxi Gong"},
+        {
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "identify the right Cunxi Gong"},
+                {"type": "text", "text": "First answer."},
+            ],
+        },
+        {"role": "user", "content": "继续"},
+    ]
+
+
+def test_responses_deepseek_anthropic_missing_thinking_error_is_client_visible(
+    tmp_path,
+    monkeypatch,
+):
+    """DeepSeek Anthropic thinking replay 400 should not surface as generic provider_error."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+
+    def failing_bridge_run(
+        self,
+        *,
+        messages,
+        tools_raw,
+        max_tokens=None,
+        temperature=None,
+        top_p=None,
+        request_options=None,
+    ):
+        raise LLMRequestError(
+            "The `content[].thinking` in the thinking mode must be passed back to the API.",
+            status_code=400,
+        )
+
+    monkeypatch.setattr(
+        "llm_router.deepseek.anthropic_web_search.DeepSeekAnthropicWebSearchBridge.run",
+        failing_bridge_run,
+    )
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": "搜索一下，谁是Cunxi Gong",
+            "tools": [{"type": "web_search", "external_web_access": True}],
+            "reasoning": {"effort": "high"},
+        },
+    )
+
+    assert response.status_code == 409
+    assert mock_make_request.call_count == 0
+    body = response.get_json()
+    assert body["error"]["code"] == "deepseek_missing_reasoning_content"
+    assert "content[].thinking" in body["error"]["message"]
 
 
 def test_responses_accepts_codex_side_channel_between_tool_call_and_output(

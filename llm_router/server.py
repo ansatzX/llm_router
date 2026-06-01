@@ -35,7 +35,9 @@ from llm_router.debug_log import log_debug
 from llm_router.deepseek import DeepSeekChatAdapter
 from llm_router.deepseek.anthropic_web_search import (
     DeepSeekAnthropicSearchExecution,
+    DeepSeekAnthropicWebSearchBridge,
     DeepSeekAnthropicWebSearchExecutor,
+    _anthropic_request_options_from_responses_payload,
     _queries_from_internal_tool_arguments,
 )
 from llm_router.llm_client import (
@@ -1165,6 +1167,20 @@ def _split_builtin_web_search_tools(
     return web_search_tools, remaining_tools
 
 
+def _deepseek_active_web_search_tool(
+    context: _ResponsesTurnContext,
+    tools_raw: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    if context.provider_state_key != "deepseek":
+        return None
+    if context.model_type != "responses_chat":
+        return None
+    if not _is_official_deepseek_base_url(context.base_url):
+        return None
+    web_search_tools, _remaining_tools = _split_builtin_web_search_tools(tools_raw)
+    return web_search_tools[0] if web_search_tools else None
+
+
 def _deepseek_web_search_internal_tool(
     web_search_tool: dict[str, Any],
 ) -> dict[str, Any]:
@@ -1217,15 +1233,9 @@ def _replace_deepseek_web_search_with_internal_tool(
     context: _ResponsesTurnContext,
     tools_raw: list[dict[str, Any]],
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-    if context.provider_state_key != "deepseek":
-        return None, tools_raw
-    if context.model_type != "responses_chat":
-        return None, tools_raw
-    if not _is_official_deepseek_base_url(context.base_url):
+    if _deepseek_active_web_search_tool(context, tools_raw) is None:
         return None, tools_raw
     web_search_tools, remaining_tools = _split_builtin_web_search_tools(tools_raw)
-    if not web_search_tools:
-        return None, tools_raw
     internal_tool = _deepseek_web_search_internal_tool(web_search_tools[0])
     return web_search_tools[0], [*remaining_tools, internal_tool]
 
@@ -1534,13 +1544,7 @@ def _run_deepseek_internal_tool_loop(
                 context.api_key,
                 context.upstream_model,
             )
-            search_result = executor.execute(
-                queries,
-                max_tokens=min(
-                    int(data.get("max_completion_tokens", 256) or 256),
-                    256,
-                ),
-            )
+            search_result = executor.execute(queries)
             total_tool_usage = _combine_responses_usage(
                 total_tool_usage,
                 search_result.usage,
@@ -1681,6 +1685,98 @@ def _responses_provider_result_from_llm(
         output_text=output_text,
         tool_calls_list=tool_calls_list,
         usage=usage,
+    )
+
+
+def _positive_int_param(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int) and value > 0:
+        return value
+    return None
+
+
+def _numeric_param(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    return None
+
+
+def _deepseek_anthropic_bridge_max_tokens(data: dict[str, Any]) -> int | None:
+    for key in ("max_tokens", "max_output_tokens", "max_completion_tokens"):
+        value = _positive_int_param(data.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _responses_tool_calls_from_output_items(
+    output_items: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    return [
+        item for item in output_items
+        if item.get("type") in {"function_call", "custom_tool_call"}
+    ]
+
+
+def _responses_provider_result_from_deepseek_anthropic_bridge(
+    bridge_result: Any,
+) -> _ResponsesProviderResult:
+    output_items = bridge_result.output_items
+    output_text = bridge_result.output_text
+    tool_calls_list = (
+        getattr(bridge_result, "tool_calls_list", None)
+        or _responses_tool_calls_from_output_items(output_items)
+    )
+    raw_response = bridge_result.raw_response if isinstance(bridge_result.raw_response, dict) else {}
+    response_message = {
+        "role": "assistant",
+        "content": output_text if output_text is not None else None,
+    }
+    llm_response = {
+        "created": raw_response.get("created", int(time.time())),
+        "choices": [
+            {
+                "message": response_message,
+                "finish_reason": raw_response.get("stop_reason", "stop"),
+            }
+        ],
+        "usage": bridge_result.usage,
+    }
+    return _ResponsesProviderResult(
+        llm_response=llm_response,
+        parse_result=None,
+        retry_count=0,
+        response_message=response_message,
+        output_items=output_items,
+        output_text=output_text,
+        tool_calls_list=tool_calls_list,
+        usage=bridge_result.usage,
+    )
+
+
+def _run_deepseek_anthropic_web_search_bridge(
+    data: dict[str, Any],
+    context: _ResponsesTurnContext,
+    tools_raw: list[dict[str, Any]],
+) -> _ResponsesProviderResult:
+    bridge = DeepSeekAnthropicWebSearchBridge(
+        context.base_url,
+        context.api_key,
+        context.upstream_model,
+    )
+    bridge_result = bridge.run(
+        messages=context.messages,
+        tools_raw=tools_raw,
+        max_tokens=_deepseek_anthropic_bridge_max_tokens(data),
+        temperature=_numeric_param(data.get("temperature")),
+        top_p=_numeric_param(data.get("top_p")),
+        request_options=_anthropic_request_options_from_responses_payload(data),
+    )
+    return _responses_provider_result_from_deepseek_anthropic_bridge(
+        bridge_result,
     )
 
 
@@ -2006,6 +2102,21 @@ def responses_api() -> tuple[Any, int]:
             instructions,
             tools_raw,
         )
+        if _deepseek_active_web_search_tool(context, tools_raw) is not None:
+            result = _run_deepseek_anthropic_web_search_bridge(
+                data,
+                context,
+                tools_raw,
+            )
+            response = _commit_and_build_responses_body(context, result, model)
+            if client_requested_stream:
+                return _build_sse_response(
+                    context.turn.response_id,
+                    result.output_items,
+                    result.usage,
+                )
+            return jsonify(response), 200
+
         deepseek_web_search_tool, main_tools_raw = _replace_deepseek_web_search_with_internal_tool(
             context,
             tools_raw,

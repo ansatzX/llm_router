@@ -82,6 +82,12 @@ def test_responses_deepseek_without_web_search_still_uses_chat_adapter(
         base_url="https://api.deepseek.com",
     )
     server_mod._config.default_upstream = "deepseek"
+    monkeypatch.setattr(
+        "llm_router.deepseek.anthropic_web_search.DeepSeekAnthropicWebSearchBridge.run",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("Non-web-search turns must stay on the Chat adapter path"),
+        ),
+    )
 
     response = client.post(
         "/v1/responses",
