@@ -31,6 +31,7 @@ class DeepSeekAnthropicWebSearchResult:
     usage: dict[str, Any]
     raw_response: dict[str, Any]
     tool_calls_list: list[dict[str, Any]] | None = None
+    provider_state: dict[str, Any] | None = None
 
 
 @dataclass
@@ -1040,6 +1041,7 @@ class DeepSeekAnthropicWebSearchBridge:
             usage=combined_usage,
             raw_response=last_response,
             tool_calls_list=tool_calls_list,
+            provider_state=_provider_state_from_output_items(output_items),
         )
         return result
 
@@ -1185,6 +1187,27 @@ def _parse_response_blocks(
             status_code=502,
         )
     return output_items, output_text, tool_calls_list
+
+
+def _provider_state_from_output_items(
+    output_items: list[dict[str, Any]],
+) -> dict[str, dict[str, str]]:
+    reasoning_by_call_id: dict[str, str] = {}
+    for item in output_items:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") not in {"function_call", "custom_tool_call"}:
+            continue
+        call_id = item.get("call_id") or item.get("id")
+        reasoning_content = item.get("reasoning_content")
+        if (
+            isinstance(call_id, str)
+            and call_id
+            and isinstance(reasoning_content, str)
+            and reasoning_content
+        ):
+            reasoning_by_call_id[call_id] = reasoning_content
+    return {"reasoning_by_call_id": reasoning_by_call_id}
 
 
 def make_deepseek_anthropic_messages_request(

@@ -116,6 +116,7 @@ class _ResponsesProviderResult:
     output_text: str | None
     tool_calls_list: list[dict[str, Any]]
     usage: dict[str, Any]
+    provider_state_updates: dict[str, Any] | None = None
 
 
 @dataclass
@@ -1775,9 +1776,15 @@ def _run_deepseek_anthropic_web_search_bridge(
         top_p=_numeric_param(data.get("top_p")),
         request_options=_anthropic_request_options_from_responses_payload(data),
     )
-    return _responses_provider_result_from_deepseek_anthropic_bridge(
+    result = _responses_provider_result_from_deepseek_anthropic_bridge(
         bridge_result,
     )
+    provider_state = getattr(bridge_result, "provider_state", None)
+    if context.provider_state_key and isinstance(provider_state, dict):
+        result.provider_state_updates = {
+            context.provider_state_key: provider_state,
+        }
+    return result
 
 
 def _find_do_web_search_calls(
@@ -1992,11 +1999,16 @@ def _commit_and_build_responses_body(
 ) -> dict[str, Any]:
     has_tool_output = bool(result.tool_calls_list)
     output_text = None if has_tool_output else result.output_text
-    provider_state_updates = (
-        {context.provider_state_key: context.chat_adapter.dump_provider_state()}
-        if context.provider_state_key
-        else None
-    )
+    provider_state_updates = dict(result.provider_state_updates or {})
+    if context.provider_state_key:
+        provider_state_updates[context.provider_state_key] = (
+            _merge_reasoning_provider_states(
+                provider_state_updates.get(context.provider_state_key),
+                context.chat_adapter.dump_provider_state(),
+            )
+        )
+    if not provider_state_updates:
+        provider_state_updates = None
     log_debug(
         "RESPONSES_RESPONSE_DIAGNOSTICS",
         _responses_response_diagnostics(

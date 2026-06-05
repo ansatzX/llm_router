@@ -287,6 +287,235 @@ def test_responses_deepseek_anthropic_bridge_replays_thinking_blocks(
     ]
 
 
+def test_responses_deepseek_anthropic_bridge_recovers_thinking_for_stateless_tool_replay(
+    tmp_path,
+    monkeypatch,
+):
+    """Hosted web_search bridge thinking sidecars must survive full-history replay."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    requests: list[dict[str, object]] = []
+
+    def fake_request(payload, llm_base_url, api_key):
+        requests.append(payload)
+        if len(requests) == 1:
+            return {
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "thinking", "thinking": "inspect files before answer"},
+                    {
+                        "type": "tool_use",
+                        "id": "call_ls",
+                        "name": "exec_command",
+                        "input": {"cmd": "ls"},
+                    },
+                ],
+                "usage": {"input_tokens": 3, "output_tokens": 4},
+            }
+        return {
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "done"}],
+            "usage": {"input_tokens": 5, "output_tokens": 6},
+        }
+
+    monkeypatch.setattr(
+        "llm_router.deepseek.anthropic_web_search.make_deepseek_anthropic_messages_request",
+        fake_request,
+    )
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    first = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": "look around",
+            "tools": [
+                {"type": "web_search", "external_web_access": True},
+                {"type": "function", "name": "exec_command"},
+            ],
+            "reasoning": {"effort": "high"},
+        },
+    )
+    assert first.status_code == 200
+
+    second = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "look around"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_ls",
+                    "name": "exec_command",
+                    "arguments": '{"cmd": "ls"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_ls",
+                    "output": "README.md",
+                },
+            ],
+            "tools": [
+                {"type": "web_search", "external_web_access": True},
+                {"type": "function", "name": "exec_command"},
+            ],
+            "reasoning": {"effort": "high"},
+        },
+    )
+
+    assert second.status_code == 200
+    assert mock_make_request.call_count == 0
+    assistant_tool_messages = [
+        message for message in requests[1]["messages"]
+        if message.get("role") == "assistant"
+        and isinstance(message.get("content"), list)
+        and any(
+            block.get("type") == "tool_use"
+            for block in message.get("content", [])
+            if isinstance(block, dict)
+        )
+    ]
+    assert len(assistant_tool_messages) == 1
+    assert assistant_tool_messages[0]["content"][0] == {
+        "type": "thinking",
+        "thinking": "inspect files before answer",
+    }
+
+
+def test_responses_deepseek_anthropic_bridge_recovers_thinking_after_store_reload(
+    tmp_path,
+    monkeypatch,
+):
+    """Hosted web_search bridge thinking sidecars must be durable on disk."""
+    client, mock_make_request = _configure_test_app(
+        tmp_path,
+        monkeypatch,
+        {
+            "created": 123,
+            "choices": [{"message": {"content": "unused"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        },
+    )
+    requests: list[dict[str, object]] = []
+
+    def fake_request(payload, llm_base_url, api_key):
+        requests.append(payload)
+        if len(requests) == 1:
+            return {
+                "stop_reason": "tool_use",
+                "content": [
+                    {"type": "thinking", "thinking": "durable bridge thinking"},
+                    {
+                        "type": "tool_use",
+                        "id": "call_read",
+                        "name": "exec_command",
+                        "input": {"cmd": "cat README.md"},
+                    },
+                ],
+                "usage": {"input_tokens": 3, "output_tokens": 4},
+            }
+        return {
+            "stop_reason": "end_turn",
+            "content": [{"type": "text", "text": "done"}],
+            "usage": {"input_tokens": 5, "output_tokens": 6},
+        }
+
+    monkeypatch.setattr(
+        "llm_router.deepseek.anthropic_web_search.make_deepseek_anthropic_messages_request",
+        fake_request,
+    )
+    server_mod._config.default_model_type = "responses_chat"
+    server_mod._config.upstreams["deepseek"] = UpstreamConfig(
+        base_url="https://api.deepseek.com",
+    )
+    server_mod._config.default_upstream = "deepseek"
+
+    first = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": "read docs",
+            "tools": [
+                {"type": "web_search", "external_web_access": True},
+                {"type": "function", "name": "exec_command"},
+            ],
+            "reasoning": {"effort": "high"},
+        },
+    )
+    assert first.status_code == 200
+
+    store_path = server_mod._sessions.store_path
+    server_mod._sessions = SessionStore(store_path=store_path, ttl_seconds=3600)
+    reloaded_session = server_mod._sessions.get(first.get_json()["id"])
+    assert reloaded_session.provider_state["deepseek"]["reasoning_by_call_id"] == {
+        "call_read": "durable bridge thinking",
+    }
+
+    second = client.post(
+        "/v1/responses",
+        json={
+            "model": "test-model",
+            "input": [
+                {
+                    "type": "message",
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "read docs"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_read",
+                    "name": "exec_command",
+                    "arguments": '{"cmd": "cat README.md"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_read",
+                    "output": "# llm_router",
+                },
+            ],
+            "tools": [
+                {"type": "web_search", "external_web_access": True},
+                {"type": "function", "name": "exec_command"},
+            ],
+            "reasoning": {"effort": "high"},
+        },
+    )
+
+    assert second.status_code == 200
+    assert mock_make_request.call_count == 0
+    assistant_tool_messages = [
+        message for message in requests[1]["messages"]
+        if message.get("role") == "assistant"
+        and isinstance(message.get("content"), list)
+        and any(
+            block.get("type") == "tool_use"
+            for block in message.get("content", [])
+            if isinstance(block, dict)
+        )
+    ]
+    assert len(assistant_tool_messages) == 1
+    assert assistant_tool_messages[0]["content"][0] == {
+        "type": "thinking",
+        "thinking": "durable bridge thinking",
+    }
+
+
 def test_responses_deepseek_anthropic_missing_thinking_error_is_client_visible(
     tmp_path,
     monkeypatch,
