@@ -57,6 +57,69 @@ Codex /v1/responses request
   -> JSON or Responses SSE returned to Codex
 ```
 
+### Official DeepSeek Chat Route
+
+```mermaid
+flowchart TD
+    C[Codex client<br/>OpenAI-style /v1/responses] --> R[llm_router /v1/responses]
+    R --> RESOLVE[Resolve model route<br/>deepseek-* route<br/>type responses_chat<br/>upstream deepseek]
+    RESOLVE --> INGEST[ResponsesStateMachine.ingest_request<br/>normalize input<br/>validate tool outputs<br/>allocate local response_id]
+    INGEST --> SESSION[(Local session store<br/>items, pending tool calls,<br/>DeepSeek provider_state)]
+    SESSION --> CTX[Build router-owned turn context<br/>recover reasoning_content by call_id<br/>detect Codex collaboration mode]
+    CTX --> ADAPT[DeepSeekChatAdapter<br/>DeepSeek payload filter<br/>shared Responses-Chat conversion<br/>developer -> system]
+    ADAPT --> FILTER[Filter provider payload<br/>drop unsupported Responses fields<br/>map documented chat params]
+    FILTER --> DS[Official DeepSeek Chat API<br/>/chat/completions]
+    DS --> PARSE[Parse provider response<br/>content, tool_calls,<br/>reasoning_content]
+    PARSE --> RECOVER{Codex compatibility recovery needed?}
+    RECOVER -->|Plan-mode plain question| RETRY_UI[Retry as request_user_input tool call]
+    RECOVER -->|Plan-mode mutation attempt| RETRY_PLAN[Retry toward proposed_plan text]
+    RECOVER -->|No| COMMIT[ResponsesStateMachine.commit_response<br/>commit after provider success only]
+    RETRY_UI --> PARSE
+    RETRY_PLAN --> PARSE
+    COMMIT --> SESSION
+    COMMIT --> OUT[Responses-shaped JSON<br/>or simulated Responses SSE]
+    OUT --> C
+    OUT -->|tool calls| TOOLS[Codex executes local tools]
+    TOOLS -->|next turn tool outputs| C
+
+    INGEST -.->|validation error| E1[Client-visible state error<br/>no upstream call<br/>no session advance]
+    DS -.->|provider error| E2[Client-visible provider error<br/>no commit]
+```
+
+### Xiaomi MiMo Chat Route
+
+```mermaid
+flowchart TD
+    C[Codex<br/>profile llm_router<br/>model mimo-*] --> R[llm_router<br/>Responses state machine]
+    R --> A[XiaomiChatAdapter<br/>preserve developer<br/>map thinking]
+    A --> T[Expose web_search as<br/>internal do_web_search]
+    T --> M[Xiaomi main model]
+    M -->|answer| O[Commit Responses output<br/>to Codex]
+    M -->|calls do_web_search| S[mimo-v2-omni<br/>Xiaomi web_search]
+    S --> M
+    M -->|after 5 searches| Q[Tool result asks<br/>continue searching?]
+    Q --> N[Reasoning summary<br/>正在多次搜索，提醒用户]
+    N --> M
+    M -->|insists| S
+```
+
+### Third-Party DeepSeek Responses Passthrough
+
+```mermaid
+flowchart TD
+    C[Codex client<br/>OpenAI-style /v1/responses] --> R[llm_router /v1/responses]
+    R --> RESOLVE[Resolve explicit route<br/>type responses_passthrough<br/>non-official DeepSeek-compatible gateway]
+    RESOLVE --> NORM[Light request normalization<br/>rewrite model to upstream_model<br/>normalize tool schema aliases<br/>force upstream stream false]
+    NORM --> UP[Third-party native Responses API<br/>/v1/responses]
+    UP --> OWN[(Upstream-owned Responses state<br/>response IDs<br/>previous_response_id<br/>pending tool state)]
+    OWN --> RESP[Provider Responses object]
+    RESP --> SHAPE[Router response shaping<br/>restore client-facing model<br/>normalize usage<br/>optionally simulate SSE]
+    SHAPE --> C
+
+    UP -.->|provider continuation failure| ERR[Client-visible provider error<br/>no fallback to local Chat emulation]
+    R -.->|official DeepSeek API matched| CHAT[Do not passthrough<br/>use official DeepSeek Chat route]
+```
+
 For `/v1/responses`, normal router-owned routes go through local Responses
 state. Route type decides provider conversion behavior:
 
@@ -197,6 +260,10 @@ Current Xiaomi behavior:
   search subrequest uses `thinking.type = "disabled"`
 - returns JSON `null` as the internal tool output when Xiaomi search fails,
   with provider status and body recorded in debug logs
+
+The static model catalog includes `mimo-v2.5-pro`, `mimo-v2.5`,
+`mimo-v2-pro`, `mimo-v2-omni`, and `mimo-v2-flash`. Image input is enabled only
+for the MiMo models with documented or maintainer-confirmed image support.
 
 Audio, TTS, and video-specific Xiaomi semantics are not yet represented as
 Codex-facing Responses behavior.

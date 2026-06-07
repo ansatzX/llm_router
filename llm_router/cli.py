@@ -100,6 +100,11 @@ def cmd_serve(args):
         set_debug_mode(True)
         print("[DEBUG] Debug mode enabled, logging to llm_router.jsonl")
 
+    enable_dashboard = getattr(args, "dashboard", False)
+    if enable_dashboard:
+        from llm_router.windows.dashboard import dashboard_bp
+        server_mod.app.register_blueprint(dashboard_bp)
+
     print(f"LLM Router starting on {cfg.server_host}:{cfg.server_port}")
     print(f"  Upstreams: {list(cfg.upstreams.keys())}")
     print(f"  Routes: {len(cfg.routes)} patterns")
@@ -177,6 +182,30 @@ def cmd_status(args):
     _print_session_load_warning(stats)
 
 
+def cmd_gui(args):
+    """Launch the Windows system tray application."""
+    _load_dotenv()
+
+    if sys.platform != "win32":
+        print("The 'gui' command is only supported on Windows.", file=sys.stderr)
+        sys.exit(1)
+
+    from llm_router.windows.config import WindowsConfig
+    from llm_router.windows.server_manager import ServerManager
+    from llm_router.windows.tray import TrayApp
+
+    cfg = _load_config(args)
+    win_cfg = WindowsConfig.from_router_config(cfg)
+
+    manager = ServerManager(
+        config_path=args.config,
+        host=cfg.server_host,
+        port=cfg.server_port,
+    )
+    tray = TrayApp(server_manager=manager, config=win_cfg)
+    tray.run()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="LLM Router — API proxy with session persistence",
@@ -193,6 +222,8 @@ def main() -> None:
                          help="Override the server port for this run")
     p_serve.add_argument("--debug", action="store_true",
                          help="Enable debug logging")
+    p_serve.add_argument("--dashboard", action="store_true",
+                         help="Enable the /dashboard web UI")
     p_serve.set_defaults(func=cmd_serve)
 
     # clear
@@ -204,6 +235,10 @@ def main() -> None:
     # status
     p_status = sub.add_parser("status", help="Show session statistics")
     p_status.set_defaults(func=cmd_status)
+
+    # gui
+    p_gui = sub.add_parser("gui", help="Launch system tray application (Windows)")
+    p_gui.set_defaults(func=cmd_gui)
 
     args = parser.parse_args()
     if not args.command:
