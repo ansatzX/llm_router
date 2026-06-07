@@ -1,7 +1,6 @@
 {
   "models": [
     {
-      "prefer_websockets": true,
       "support_verbosity": true,
       "default_verbosity": "low",
       "apply_patch_tool_type": "freeform",
@@ -19,7 +18,6 @@
       "context_window": 272000,
       "max_context_window": 272000,
       "auto_compact_token_limit": null,
-      "reasoning_summary_format": "experimental",
       "default_reasoning_summary": "none",
       "slug": "gpt-5.5",
       "display_name": "GPT-5.5",
@@ -45,7 +43,6 @@
       ],
       "shell_type": "shell_command",
       "visibility": "list",
-      "minimal_client_version": "0.124.0",
       "supported_in_api": true,
       "availability_nux": {
         "message": "GPT-5.5 is now available in Codex. It's our strongest agentic coding model yet, built to reason through large codebases, check assumptions with tools, and keep going until the work is done.\n\nLearn more: https://openai.com/index/introducing-gpt-5-5/\n\n"
@@ -62,25 +59,6 @@
         }
       },
       "experimental_supported_tools": [],
-      "available_in_plans": [
-        "business",
-        "edu",
-        "education",
-        "enterprise",
-        "enterprise_cbp_usage_based",
-        "finserv",
-        "free",
-        "free_workspace",
-        "go",
-        "hc",
-        "k12",
-        "plus",
-        "pro",
-        "prolite",
-        "quorum",
-        "self_serve_business_usage_based",
-        "team"
-      ],
       "supports_search_tool": true,
       "service_tiers": [
         {
@@ -92,10 +70,12 @@
       "additional_speed_tiers": [
         "fast"
       ],
-      "supports_reasoning_summaries": true
+      "supports_reasoning_summaries": true,
+      "default_service_tier": null,
+      "effective_context_window_percent": 95,
+      "auto_review_model_override": null
     },
     {
-      "prefer_websockets": true,
       "support_verbosity": true,
       "default_verbosity": "low",
       "apply_patch_tool_type": "freeform",
@@ -113,7 +93,6 @@
       "context_window": 272000,
       "max_context_window": 1000000,
       "auto_compact_token_limit": null,
-      "reasoning_summary_format": "experimental",
       "default_reasoning_summary": "none",
       "slug": "gpt-5.4",
       "display_name": "gpt-5.4",
@@ -139,7 +118,6 @@
       ],
       "shell_type": "shell_command",
       "visibility": "list",
-      "minimal_client_version": "0.98.0",
       "supported_in_api": true,
       "availability_nux": null,
       "upgrade": null,
@@ -154,22 +132,6 @@
         }
       },
       "experimental_supported_tools": [],
-      "available_in_plans": [
-        "business",
-        "edu",
-        "education",
-        "enterprise",
-        "enterprise_cbp_usage_based",
-        "finserv",
-        "go",
-        "hc",
-        "plus",
-        "pro",
-        "prolite",
-        "quorum",
-        "self_serve_business_usage_based",
-        "team"
-      ],
       "supports_search_tool": true,
       "service_tiers": [
         {
@@ -181,10 +143,12 @@
       "additional_speed_tiers": [
         "fast"
       ],
-      "supports_reasoning_summaries": true
+      "supports_reasoning_summaries": true,
+      "default_service_tier": null,
+      "effective_context_window_percent": 95,
+      "auto_review_model_override": null
     },
     {
-      "prefer_websockets": true,
       "support_verbosity": true,
       "default_verbosity": "medium",
       "apply_patch_tool_type": "freeform",
@@ -202,7 +166,6 @@
       "context_window": 272000,
       "max_context_window": 272000,
       "auto_compact_token_limit": null,
-      "reasoning_summary_format": "experimental",
       "default_reasoning_summary": "none",
       "slug": "gpt-5.4-mini",
       "display_name": "GPT-5.4-Mini",
@@ -228,7 +191,6 @@
       ],
       "shell_type": "shell_command",
       "visibility": "list",
-      "minimal_client_version": "0.98.0",
       "supported_in_api": true,
       "availability_nux": null,
       "upgrade": null,
@@ -243,32 +205,15 @@
         }
       },
       "experimental_supported_tools": [],
-      "available_in_plans": [
-        "business",
-        "edu",
-        "education",
-        "enterprise",
-        "enterprise_cbp_usage_based",
-        "finserv",
-        "free",
-        "free_workspace",
-        "go",
-        "hc",
-        "k12",
-        "plus",
-        "pro",
-        "prolite",
-        "quorum",
-        "self_serve_business_usage_based",
-        "team"
-      ],
       "supports_search_tool": true,
       "service_tiers": [],
       "additional_speed_tiers": [],
-      "supports_reasoning_summaries": true
+      "supports_reasoning_summaries": true,
+      "default_service_tier": null,
+      "effective_context_window_percent": 95,
+      "auto_review_model_override": null
     },
     {
-      "prefer_websockets": true,
       "support_verbosity": true,
       "default_verbosity": "low",
       "apply_patch_tool_type": "freeform",
@@ -286,7 +231,6 @@
       "context_window": 272000,
       "max_context_window": 272000,
       "auto_compact_token_limit": null,
-      "reasoning_summary_format": "experimental",
       "default_reasoning_summary": "none",
       "slug": "gpt-5.3-codex",
       "display_name": "gpt-5.3-codex",
@@ -312,7 +256,6 @@
       ],
       "shell_type": "shell_command",
       "visibility": "list",
-      "minimal_client_version": "0.98.0",
       "supported_in_api": true,
       "availability_nux": null,
       "upgrade": {
@@ -330,26 +273,13 @@
         }
       },
       "experimental_supported_tools": [],
-      "available_in_plans": [
-        "business",
-        "edu",
-        "education",
-        "enterprise",
-        "enterprise_cbp_usage_based",
-        "finserv",
-        "go",
-        "hc",
-        "plus",
-        "pro",
-        "prolite",
-        "quorum",
-        "self_serve_business_usage_based",
-        "team"
-      ],
       "supports_search_tool": true,
       "service_tiers": [],
       "additional_speed_tiers": [],
-      "supports_reasoning_summaries": true
+      "supports_reasoning_summaries": true,
+      "default_service_tier": null,
+      "effective_context_window_percent": 95,
+      "auto_review_model_override": null
     }
   ]
 }

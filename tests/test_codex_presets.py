@@ -2,7 +2,13 @@
 
 from pathlib import Path
 
+import tomllib
+
 from llm_router.codex_presets import discover_preset_files, sync_codex_presets
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+PROFILE_NAMES = ("aihubmix", "llm_router")
+PROFILE_CATALOG_DOC = REPO_ROOT / "docs" / "codex-profile-catalog.md"
 
 
 def test_discover_preset_files_only_selects_root_presets(tmp_path):
@@ -59,3 +65,39 @@ def test_sync_codex_presets_uses_codex_home_env(tmp_path, monkeypatch):
 
     assert copied == [Path(codex_home / "llm_router.json")]
     assert (codex_home / "llm_router.json").read_text(encoding="utf-8") == "{}"
+
+
+def test_three_file_profiles_keep_provider_catalog_and_profile_layers_separate():
+    """Codex -p profiles use base providers, profile TOML, and profile JSON."""
+    base_config = tomllib.loads(
+        (REPO_ROOT / "codex.config.example.toml").read_text(encoding="utf-8")
+    )
+    providers = base_config["model_providers"]
+
+    for profile in PROFILE_NAMES:
+        profile_config_path = REPO_ROOT / f"{profile}.config.toml"
+        profile_catalog_path = REPO_ROOT / f"{profile}.json"
+        profile_config = tomllib.loads(profile_config_path.read_text(encoding="utf-8"))
+
+        assert profile_config_path.is_file()
+        assert profile_catalog_path.is_file()
+        assert profile_config["model_provider"] == profile
+        assert profile_config["model_catalog_json"] == f"~/.codex/{profile}.json"
+        assert "model_providers" not in profile_config
+        assert profile in providers
+
+
+def test_profile_catalog_contract_is_documented():
+    """The profile JSON schema must have a maintained field reference."""
+    assert PROFILE_CATALOG_DOC.is_file()
+    doc = PROFILE_CATALOG_DOC.read_text(encoding="utf-8")
+
+    for required_text in (
+        "<profile>.json",
+        "ModelInfo",
+        "codex features list",
+        "experimental_supported_tools",
+        "multi_agent_version",
+        "tool_mode",
+    ):
+        assert required_text in doc

@@ -3,6 +3,8 @@
 These documents separate current behavior from future design work.
 
 - `architecture.md`: current runtime architecture and module responsibilities.
+- `codex-profile-catalog.md`: Codex `<profile>.json` field contract and
+  three-file profile maintenance rules.
 - `codex-runtime-rules.md`: verified Codex request/runtime facts.
 - `provider-adapters.md`: how to add or modify provider support.
 - `testing.md`: test strategy and commands.

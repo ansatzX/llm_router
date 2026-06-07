@@ -11,6 +11,7 @@ The test suite protects real router behavior:
 - Xiaomi thinking, image, web-search, and reasoning replay behavior
 - MiroThinker MCP parsing and retry behavior
 - model routing and upstream model rewrites
+- Codex profile preset and model catalog contracts
 - Plan-mode compatibility recovery
 - debug JSONL logging
 
@@ -37,6 +38,8 @@ Avoid tests that only lock in incidental helper structure.
 - `tests/test_model_catalog.py`: static model catalog regressions.
 - `tests/test_mirothinker_adapter.py`: MiroThinker MCP-first behavior.
 - `tests/test_config.py`: routing and upstream model rewrite behavior.
+- `tests/test_codex_presets.py`: Codex three-file profile preset separation and
+  catalog documentation checks.
 - `tests/test_session_store.py`: persisted session behavior.
 - `tests/test_thread_safety.py`: initialization and threading assumptions.
 - `tests/live/test_codex_cli_e2e.py`: opt-in real Codex CLI smoke test.
@@ -60,6 +63,7 @@ Run focused files:
 uv run python -m pytest tests/test_server_responses.py -q
 uv run python -m pytest tests/responses/plan_mode.py -q
 uv run python -m pytest tests/test_deepseek_adapter.py -q
+uv run python -m pytest tests/test_codex_presets.py tests/test_model_catalog.py -q
 ```
 
 Run live Codex e2e only when explicitly needed:

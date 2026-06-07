@@ -40,6 +40,46 @@ Behavioral changes must be grounded in three sources together:
 When these disagree, do not guess. Reproduce the actual request shape first,
 then adapt the provider boundary.
 
+## Codex Profile Presets
+
+This repository uses Codex profile-v2's three-file mode. Keep the three files
+separate:
+
+- `codex.config.example.toml`: base user config example. It owns shared
+  `[model_providers.<profile>]` definitions such as `llm_router` and
+  `aihubmix`.
+- `<profile>.config.toml`: selected by `codex -p <profile>`. It owns only the
+  active profile choices such as `model_provider`, `model`,
+  `model_catalog_json`, reasoning effort, personality, and other stable
+  runtime config fields. Do not add `[model_providers]` here while this repo is
+  using three-file mode.
+- `<profile>.json`: model catalog loaded by the profile's
+  `model_catalog_json`. It owns Codex-facing model metadata.
+
+Do not use legacy `[profiles.<profile>]` tables or `profile = "<profile>"` in
+the base config for these presets. Current Codex source treats `-p <profile>` as
+`$CODEX_HOME/<profile>.config.toml`; a matching legacy profile entry in
+`config.toml` is a hard config error.
+
+When changing any of these files, check the profile contract in the current
+Codex source as well as router behavior:
+
+- verify `SharedCliOptions --profile`, profile config loading, and
+  `model_catalog_json` parsing in the local Codex checkout
+- run `codex features list` and avoid fields or values that depend on
+  experimental, under-development, deprecated, or removed features unless the
+  maintainer explicitly approves that risk
+- verify every `<profile>.config.toml` points to its matching
+  `~/.codex/<profile>.json`
+- verify every `<profile>.json` exposes all stable Codex-consumed model catalog
+  fields documented in `docs/codex-profile-catalog.md`
+- keep provider API documentation and observed behavior in scope when a profile
+  points Codex directly at a provider, such as `aihubmix`
+
+The preset sync copies root-level `*.config.toml` and `*.json` files into
+`CODEX_HOME`. Treat those repository files as canonical generated inputs for the
+user-facing Codex profile files.
+
 ## Code Map
 
 - `llm_router/server.py`: HTTP entrypoint and request orchestration. Keep this
