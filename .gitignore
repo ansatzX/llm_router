@@ -172,3 +172,4 @@ cython_debug/
 .ruff_cache
 *.md
 !docs/codex-profile-catalog.md
+!docs/superpowers/specs/2026-06-08-windows-ui-decoupling-design.md
