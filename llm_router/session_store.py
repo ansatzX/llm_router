@@ -251,7 +251,7 @@ class SessionStore:
                         s.response_id: s.to_dict() for s in unique_sessions
                     },
                 }
-                with os.fdopen(fd, "w") as f:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
                     fd = None
                     json.dump(data, f, indent=2, ensure_ascii=False)
                 os.replace(tmp, self.store_path)
